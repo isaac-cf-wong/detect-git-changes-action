@@ -1,0 +1,26 @@
+{
+    "$schema": "https://raw.githubusercontent.com/streetsidesoftware/cspell/main/cspell.schema.json",
+    "version": "0.2",
+    "language": "en",
+    "dictionaries": ["en", "ignore-words", "softwareTerms"],
+    "dictionaryDefinitions": [
+        {
+            "name": "ignore-words",
+            "path": ".ignore_words.txt",
+            "addWords": true
+        }
+    ],
+    "languageSettings": [
+        {
+            "languageId": "*",
+            "locale": "en",
+            "dictionaries": ["en", "ignore-words"]
+        },
+        {
+            "languageId": "python",
+            "locale": "en",
+            "dictionaries": ["en", "ignore-words", "softwareTerms"]
+        }
+    ],
+    "ignorePaths": ["node_modules/**", ".ignore_words.txt", "**/dist/**"]
+}

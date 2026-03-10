@@ -1,0 +1,72 @@
+repos:
+    - repo: https://github.com/pre-commit/pre-commit-hooks
+      rev: v6.0.0
+      hooks:
+          - id: check-added-large-files
+            stages: [pre-commit]
+          - id: check-case-conflict
+            stages: [pre-commit]
+          - id: check-merge-conflict
+            stages: [pre-commit]
+          - id: check-symlinks
+            stages: [pre-commit]
+          - id: check-yaml
+            stages: [pre-commit]
+          - id: check-toml
+            stages: [pre-commit]
+          - id: debug-statements
+            stages: [pre-commit]
+          - id: end-of-file-fixer
+            stages: [pre-commit]
+          - id: mixed-line-ending
+            stages: [pre-commit]
+          - id: trailing-whitespace
+            stages: [pre-commit]
+          - id: check-json
+            stages: [pre-commit]
+
+    - repo: https://github.com/streetsidesoftware/cspell-cli
+      rev: v9.6.0 # Keep this version or update to the latest stable
+      hooks:
+          - id: cspell
+            name: Check spelling in Python, reSt, and Markdown files.
+            args: ['--config', 'cspell.json']
+            files: ^.*\.(py|rst|md)$
+            stages: [pre-commit]
+          - id: cspell
+            name: Check commit message spelling.
+            args:
+                - --config
+                - cspell.json
+                - --no-must-find-files
+                - --no-progress
+                - --no-summary
+                - --files
+                - .git/COMMIT_EDITMSG
+            stages: [commit-msg]
+            always_run: true
+
+    - repo: https://github.com/rhysd/actionlint
+      rev: v1.6.26
+      hooks:
+          - id: actionlint
+
+    - repo: https://github.com/koalaman/shellcheck-precommit
+      rev: v0.9.0
+      hooks:
+          - id: shellcheck
+
+    - repo: https://github.com/rbubley/mirrors-prettier
+      rev: v3.8.1
+      hooks:
+          - id: prettier
+            stages: [pre-commit]
+
+    - repo: https://github.com/DavidAnson/markdownlint-cli2
+      rev: v0.21.0
+      hooks:
+          - id: markdownlint-cli2
+            stages: [pre-commit]
+            args:
+                - --config
+                - .markdownlint.yaml

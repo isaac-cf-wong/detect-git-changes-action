@@ -10,10 +10,15 @@ echo "Comparing ${BASE} ... ${HEAD}"
 
 # Resolve to real SHAs (handles origin/ prefix if needed)
 base_sha=$(git rev-parse --verify "${BASE}" 2>/dev/null || git rev-parse --verify "origin/${BASE}" 2>/dev/null || echo "")
-head_sha=$(git rev-parse --verify "${HEAD}" 2>/dev/null || git rev-parse --verify "origin/${HEAD}" 2>/dev/null || echo "HEAD")
+head_sha=$(git rev-parse --verify "${HEAD}" 2>/dev/null || git rev-parse --verify "origin/${HEAD}" 2>/dev/null || echo "")
 
 if [[ -z "${base_sha}" ]]; then
 	echo "::error::Cannot resolve base-ref '${BASE}'" >&2
+	exit 1
+fi
+
+if [[ -z "${head_sha}" ]]; then
+	echo "::error::Cannot resolve head-ref '${HEAD}'" >&2
 	exit 1
 fi
 

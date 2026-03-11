@@ -1,0 +1,37 @@
+name: Integration Test Action
+
+on:
+    push:
+        branches: [main]
+    pull_request:
+    workflow_dispatch:
+
+jobs:
+    test:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+
+            - name: No change – same ref
+              id: same
+              uses: ./
+              with:
+                  base-ref: HEAD
+                  head-ref: HEAD
+
+            - name: Assert no change
+              run: |
+                  [[ "${{ steps.same.outputs.has-changes }}" == "false" ]] || exit 1
+
+            - name: Expect change – last commit
+              id: diff
+              uses: ./
+              with:
+                  base-ref: HEAD~1
+
+            - name: Assert change detected
+              run: |
+                  [[ "${{ steps.diff.outputs.has-changes }}" == "true" ]] || exit 1
+                  [[ -n "${{ steps.diff.outputs.changed-files-count }}" ]] || exit 1

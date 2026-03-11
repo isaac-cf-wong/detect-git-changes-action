@@ -1,0 +1,41 @@
+# action.yml (minimal version)
+name: 'Has Git Changes'
+description: 'Detect changes in a git repository'
+inputs:
+    base-ref:
+        description: 'Base ref to compare from (branch/tag/sha).'
+        required: true
+    head-ref:
+        description: 'Head ref to compare to (default: current HEAD).'
+        required: false
+        default: 'HEAD'
+    paths:
+        description: 'Optional comma-separated paths/globs to limit comparison.'
+        required: false
+
+outputs:
+    has-changes:
+        description: 'true if changes exist, false otherwise.'
+        value: ${{ steps.detect.outputs.has_changes }}
+    changed-files-count:
+        description: 'Approximate number of changed files.'
+        value: ${{ steps.detect.outputs.changed_files_count }}
+
+runs:
+    using: composite
+    steps:
+        - name: Ensure git history
+          shell: bash
+          run: |
+              git fetch --prune --unshallow || true
+              git fetch origin +refs/tags/*:refs/tags/* || true
+              git fetch origin ${{ inputs.base-ref }}:${{ inputs.base-ref }} || true
+              git fetch origin ${{ inputs.head-ref }}:${{ inputs.head-ref }} || true
+
+        - id: detect
+          shell: bash
+          run: ${{ github.action_path }}/entrypoint.sh
+          env:
+              INPUT_BASE_REF: ${{ inputs.base-ref }}
+              INPUT_HEAD_REF: ${{ inputs.head-ref }}
+              INPUT_PATHS: ${{ inputs.paths }}

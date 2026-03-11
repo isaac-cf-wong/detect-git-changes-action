@@ -1,2 +1,4 @@
 shfmt
 shellcheck
+Zenodo
+DOI

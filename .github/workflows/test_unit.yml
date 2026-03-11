@@ -12,5 +12,6 @@ jobs:
             - uses: actions/checkout@v6
             - name: Run bash unit tests
               run: |
+                  chmod +x entrypoint.sh
                   chmod +x tests/unit/test_has_changes.sh
                   ./tests/unit/test_has_changes.sh

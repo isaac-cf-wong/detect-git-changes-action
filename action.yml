@@ -1,4 +1,3 @@
-# action.yml (minimal version)
 name: 'Has Git Changes'
 description: 'Detect changes in a git repository'
 
@@ -9,7 +8,13 @@ branding:
 inputs:
     base-ref:
         description: 'Base ref to compare from (branch/tag/sha).'
-        required: true
+        required: false
+    use-latest-tag:
+        description:
+            'If true, automatically use the latest tag as base (overrides
+            base-ref).'
+        required: false
+        default: 'false'
     head-ref:
         description: 'Head ref to compare to (default: current HEAD).'
         required: false
@@ -34,13 +39,20 @@ runs:
           run: |
               git fetch --prune --unshallow || true
               git fetch origin +refs/tags/*:refs/tags/* || true
-              git fetch origin ${{ inputs.base-ref }}:${{ inputs.base-ref }} || true
-              git fetch origin ${{ inputs.head-ref }}:${{ inputs.head-ref }} || true
+
+              if [[ -n "${{ inputs.base-ref }}" ]] && [[ "${{ inputs.use-latest-tag }}" != "true" ]]; then
+                git fetch origin ${{ inputs.base-ref }}:${{ inputs.base-ref }} || true
+              fi
+
+              if [[ "${{ inputs.head-ref }}" != "HEAD" ]]; then
+                git fetch origin ${{ inputs.head-ref }}:${{ inputs.head-ref }} || true
+              fi
 
         - id: detect
           shell: bash
           run: ${{ github.action_path }}/entrypoint.sh
           env:
               INPUT_BASE_REF: ${{ inputs.base-ref }}
+              INPUT_USE_LATEST_TAG: ${{ inputs.use-latest-tag }}
               INPUT_HEAD_REF: ${{ inputs.head-ref }}
               INPUT_PATHS: ${{ inputs.paths }}

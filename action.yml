@@ -1,4 +1,4 @@
-name: 'Has Git Changes'
+name: 'detect-git-changes-action'
 description: 'Detect changes in a git repository'
 
 branding:

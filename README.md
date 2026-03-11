@@ -4,6 +4,7 @@
 [![Unit Tests](https://github.com/isaac-cf-wong/detect-git-changes-action/actions/workflows/test_unit.yml/badge.svg)](https://github.com/isaac-cf-wong/detect-git-changes-action/actions/workflows/test_unit.yml)
 [![pre-commit.ci status](https://results.pre-commit.ci/badge/github/isaac-cf-wong/detect-git-changes-action/main.svg)](https://results.pre-commit.ci/latest/github/isaac-cf-wong/detect-git-changes-action/main)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/isaac-cf-wong/detect-git-changes-action/blob/main/LICENSE)
+[![DOI](https://zenodo.org/badge/1178081717.svg)](https://doi.org/10.5281/zenodo.18955820)
 
 A lightweight, robust GitHub Action to detect if changes have occurred in your
 repository compared to a specific base reference (e.g., the latest tag, a

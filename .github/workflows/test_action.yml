@@ -1,8 +1,5 @@
 name: Integration Test Action
 
-permissions:
-    contents: read
-
 on:
     push:
         branches: [main]

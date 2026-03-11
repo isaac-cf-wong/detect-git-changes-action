@@ -42,7 +42,6 @@ You can limit the detection to specific directories or file globs.
 - name: Detect changes in docs
   id: detect_docs
   uses: isaac-cf-wong/detect-git-changes-action@v0
-
   with:
       base-ref: 'main'
       paths: 'docs/**,README.md'

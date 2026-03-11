@@ -35,9 +35,11 @@ count_cmd=(git diff --name-only "${base_sha}" "${head_sha}")
 
 if [[ -n "${PATHS}" ]]; then
 	IFS=',' read -ra path_array <<<"${PATHS}"
+	diff_cmd+=(--)
+	count_cmd+=(--)
 	for p in "${path_array[@]}"; do
-		diff_cmd+=(-- "${p}")
-		count_cmd+=(-- "${p}")
+		diff_cmd+=("${p}")
+		count_cmd+=("${p}")
 	done
 fi
 

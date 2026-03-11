@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(git rev-parse --show-toplevel)"
 
 echo "→ Running unit tests for entrypoint.sh"
 

@@ -32,6 +32,12 @@
             "matchManagers": ["github-actions"],
             "matchUpdateTypes": ["major"],
             "enabled": false
+        },
+        {
+            "matchManagers": ["pre-commit"],
+            "automerge": true,
+            "automergeType": "pr",
+            "automergeStrategy": "squash"
         }
     ],
     "rangeStrategy": "bump"

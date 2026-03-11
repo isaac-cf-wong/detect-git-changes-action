@@ -1,6 +1,11 @@
 # action.yml (minimal version)
 name: 'Has Git Changes'
 description: 'Detect changes in a git repository'
+
+branding:
+    icon: git-commit
+    color: blue
+
 inputs:
     base-ref:
         description: 'Base ref to compare from (branch/tag/sha).'

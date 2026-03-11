@@ -21,10 +21,10 @@ echo "✓ same ref → false"
 
 # Test 2: invalid base → should fail
 export INPUT_BASE_REF=does-not-exist-123abc
-bash entrypoint.sh 2>/dev/null && {
+if bash entrypoint.sh 2>/dev/null; then
 	echo "Fail: invalid ref did not error"
 	exit 1
-}
+fi
 echo "✓ invalid ref → errors"
 
 # More tests: you can create a temp git repo here and commit files

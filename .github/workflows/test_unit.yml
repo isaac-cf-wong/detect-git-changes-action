@@ -10,8 +10,12 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v6
+            - name: Install BATS
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y bats
             - name: Run bash unit tests
               run: |
-                  chmod +x entrypoint.sh
                   chmod +x tests/unit/test_has_changes.sh
                   ./tests/unit/test_has_changes.sh
+                  bats tests/unit/test_latest_tag.bats

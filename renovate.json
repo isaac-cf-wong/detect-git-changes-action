@@ -7,6 +7,9 @@
     ],
     "dependencyDashboard": true,
     "dependencyDashboardTitle": "Dependency Dashboard",
+    "pre-commit": {
+        "enabled": true
+    },
     "lockFileMaintenance": {
         "enabled": true,
         "schedule": ["before 4am on monday"]
@@ -29,11 +32,6 @@
             "matchManagers": ["github-actions"],
             "matchUpdateTypes": ["major"],
             "enabled": false
-        },
-        {
-            "pre-commit": {
-                "enabled": true
-            }
         }
     ],
     "rangeStrategy": "bump"

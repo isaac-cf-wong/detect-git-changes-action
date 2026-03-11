@@ -6,6 +6,9 @@ on:
     pull_request:
     workflow_call:
 
+permissions:
+    contents: read
+
 jobs:
     unit:
         runs-on: ubuntu-latest

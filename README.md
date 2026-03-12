@@ -24,7 +24,7 @@ To use this action, you must checkout your repository with full history
 
 - name: Detect changes
   id: detect
-  uses: isaac-cf-wong/detect-git-changes-action@v0
+  uses: isaac-cf-wong/detect-git-changes-action@v0.0.2
   with:
       use-latest-tag: 'true'
 
@@ -42,7 +42,7 @@ You can limit the detection to specific directories or file globs.
 ```yaml
 - name: Detect changes in docs
   id: detect_docs
-  uses: isaac-cf-wong/detect-git-changes-action@v0
+  uses: isaac-cf-wong/detect-git-changes-action@v0.0.2
   with:
       base-ref: 'main'
       paths: 'docs/**,README.md'

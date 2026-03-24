@@ -24,16 +24,16 @@ PATHS="${INPUT_PATHS:-}"
 echo "Comparing ${BASE_REF} ... ${HEAD_REF}"
 
 # Resolve to real SHAs (handles origin/ prefix if needed)
-BASE_SHA=$(git rev-parse --verify "${BASE_REF}" 2>/dev/null || git rev-parse --verify "origin/${BASE}" 2>/dev/null || echo "")
-HEAD_SHA=$(git rev-parse --verify "${HEAD_REF}" 2>/dev/null || git rev-parse --verify "origin/${HEAD}" 2>/dev/null || echo "")
+BASE_SHA=$(git rev-parse --verify "${BASE_REF}" 2>/dev/null || git rev-parse --verify "origin/${BASE_REF}" 2>/dev/null || echo "")
+HEAD_SHA=$(git rev-parse --verify "${HEAD_REF}" 2>/dev/null || git rev-parse --verify "origin/${HEAD_REF}" 2>/dev/null || echo "")
 
 if [[ -z "${BASE_SHA}" ]]; then
-	echo "::error::Cannot resolve base-ref '${BASE}'" >&2
+	echo "::error::Cannot resolve base-ref '${BASE_REF}'" >&2
 	exit 1
 fi
 
 if [[ -z "${HEAD_SHA}" ]]; then
-	echo "::error::Cannot resolve head-ref '${HEAD}'" >&2
+	echo "::error::Cannot resolve head-ref '${HEAD_REF}'" >&2
 	exit 1
 fi
 

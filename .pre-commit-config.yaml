@@ -32,7 +32,7 @@ repos:
             stages: [pre-commit]
 
     - repo: https://github.com/streetsidesoftware/cspell-cli
-      rev: v9.8.0 # Keep this version or update to the latest stable
+      rev: v10.0.1 # Keep this version or update to the latest stable
       hooks:
           - id: cspell
             name: Check spelling in Python, reSt, and Markdown files.
@@ -63,7 +63,7 @@ repos:
           - id: shellcheck
 
     - repo: https://github.com/scop/pre-commit-shfmt
-      rev: v3.13.0-1
+      rev: v3.13.1-1
       hooks:
           - id: shfmt
 

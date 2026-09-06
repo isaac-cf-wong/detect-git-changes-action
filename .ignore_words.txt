@@ -1,4 +1,0 @@
-shfmt
-shellcheck
-Zenodo
-DOI

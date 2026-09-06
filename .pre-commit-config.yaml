@@ -57,3 +57,4 @@ repos:
       rev: v1.8.1
       hooks:
           - id: betterleaks
+            stages: [pre-commit]

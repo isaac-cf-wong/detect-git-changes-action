@@ -6,7 +6,7 @@ extend-ignore-re = [
   #   # typos:off          ...   # typos:on
   #   // typos:off         ...   // typos:on
   #   /* typos:off */      ...   /* typos:on */
-  "(?s)(<!--|#|//|/\\*)\\s*typos:off.*?\\n\\s*(<!--|#|//|\\*/)\\s*typos:on",
+  "(?s)(<!--|#|//|/\\*)\\s*typos:off.*?\\n\\s*(<!--|#|//|/\\*)\\s*typos:on",
 
   # === Single-line ignore ===
   # Example: some text with intentional typo  <!-- typos:disable-line -->

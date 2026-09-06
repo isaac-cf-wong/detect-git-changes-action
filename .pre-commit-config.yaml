@@ -39,13 +39,11 @@ repos:
       rev: v3.9.6
       hooks:
           - id: prettier
-            stages: [pre-commit]
 
     - repo: https://github.com/DavidAnson/markdownlint-cli2
       rev: v0.23.2
       hooks:
           - id: markdownlint-cli2
-            stages: [pre-commit]
             args:
                 - --config
                 - .markdownlint.yaml

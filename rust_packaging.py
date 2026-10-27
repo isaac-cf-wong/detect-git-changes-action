@@ -22,6 +22,7 @@ collection and symlink following are shared with python_packaging.py. Only the
 standard library is used; ``tomllib`` needs Python 3.11 or later.
 """
 
+import bisect
 import fnmatch
 import os
 import posixpath
@@ -126,6 +127,8 @@ CONCAT_ARG = re.compile(r"concat!\s*\(")
 CONCAT_PART = re.compile(rf'\s*(?:(?:{STRING})|(?P<var>\$\w+)|(?P<env>env!\s*\(\s*"(?P<name>\w+)"\s*\)))\s*(?P<end>,\s*\)|,|\))', re.S)
 PATH_ATTR = re.compile(rf"#\[\s*(?:cfg_attr\s*\([^\]]*?,\s*)?path\s*=\s*(?:{STRING})", re.S)
 MOD_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(?:r#)?(\w+)\s*;", re.M)
+INLINE_MOD = re.compile(r"\bmod\s+(?:r#)?(\w+)\s*\{")
+CHAR = re.compile(r"'(?:\\.|[^\\'\n])'")
 RERUN = re.compile(r"cargo::?rerun-if-changed=")
 # Stands for the crate's directory in a path: `$CARGO_MANIFEST_DIR` or `env!("CARGO_MANIFEST_DIR")`.
 CRATE_ROOT = "\0crate"
@@ -206,6 +209,29 @@ def line_of(text, pos):
     return text.count("\n", 0, pos) + 1
 
 
+def blank_literals(text):
+    """Text with the insides of string and char literals blanked, so braces in them don't count."""
+    blank = lambda m: m.group(0)[0] + " " * (len(m.group(0)) - 2) + m.group(0)[-1]
+    return CHAR.sub(blank, re.sub(STRING, blank, text, flags=re.S))
+
+
+def inline_modules(text):
+    """A function from a position to the inline modules (`mod name { ... }`) enclosing it."""
+    blanked = blank_literals(text)
+    opens = {m.end() - 1: m.group(1) for m in INLINE_MOD.finditer(blanked)}
+    stack, starts, contexts = [], [0], [()]
+    for i, ch in enumerate(blanked):
+        if ch == "{":
+            stack.append(opens.get(i))
+        elif ch == "}" and stack:
+            stack.pop()
+        else:
+            continue
+        starts.append(i + 1)
+        contexts.append(tuple(n for n in stack if n))
+    return lambda pos: contexts[bisect.bisect_right(starts, pos) - 1]
+
+
 def closing_paren(text, start):
     """The index just past the parenthesis that closes the one before ``start``."""
     depth, i, n = 1, start, len(text)
@@ -231,6 +257,7 @@ class Scanner:
         self.seen = set()
         self.submodules = submodules(sha)
         self.crate = ""  # the crate whose sources are being scanned
+        self.roots = set()  # crate root files: their modules sit beside them, as for mod.rs
 
     def scan(self, paths, follow_mods=False):
         """Scan .rs files; ``follow_mods`` also tracks their `mod x;` files (for files outside src/)."""
@@ -246,19 +273,40 @@ class Scanner:
 
     def scan_one(self, path, text, follow_mods):
         c, here, more = self.c, posixpath.dirname(path), []
+        # Where this file's child modules live: beside a mod-rs file (a crate
+        # root or mod.rs), in a directory named after any other file; inside an
+        # inline module, one directory further per module.
+        stem = posixpath.splitext(posixpath.basename(path))[0]
+        mod_rs = stem == "mod" or path in self.roots or follow_mods == "root"
+        module_dir = here if mod_rs else join(here, stem)
+        context = inline_modules(text)
 
-        def resolve(target):
+        def modules_at(pos):
+            inline = context(pos)
+            return join(module_dir, "/".join(inline)) if inline else module_dir
+
+        def resolve(target, base=here):
             if target.startswith("$CARGO_MANIFEST_DIR"):
                 target = CRATE_ROOT + target[len("$CARGO_MANIFEST_DIR") :]
             if target.startswith(CRATE_ROOT):
-                return join(self.crate, target[len(CRATE_ROOT) :].lstrip("/"))
-            return join(here, target) if not target.startswith("/") else None
+                rest = target[len(CRATE_ROOT) :].lstrip("/")
+                return join(self.crate, rest) if rest else self.crate
+            return join(base, target) if not target.startswith("/") else None
+
+        def whole_repository(target, pos):
+            c.unresolved(
+                f"{path}:{line_of(text, pos)}: {target.replace(CRATE_ROOT, '$CARGO_MANIFEST_DIR')!r} names the whole"
+                " repository; add the files involved to 'paths'"
+            )
 
         def submodule_of(resolved):
             return next((m for m in self.submodules if resolved and resolved.startswith(f"{m}/")), None)
 
-        def pull_in(target, what, pos, follow):
-            resolved = resolve(target)
+        def pull_in(target, what, pos, follow, base=here):
+            resolved = resolve(target, base)
+            if resolved == "":
+                whole_repository(target, pos)
+                return
             # A file inside a submodule changes with the submodule's commit.
             module = submodule_of(resolved)
             if module:
@@ -306,7 +354,10 @@ class Scanner:
                     " literal cannot be followed; add the files involved to 'paths'"
                 )
         for m in PATH_ATTR.finditer(text):
-            pull_in(literal(m), "#[path]", m.start(), True)
+            # At the top of a file, relative to its directory; inside inline
+            # modules, to where those modules' children live.
+            inline = context(m.start())
+            pull_in(literal(m), "#[path]", m.start(), True, base=modules_at(m.start()) if inline else here)
         # Proc macros read files the compiler never sees named -- include_dir!,
         # rust-embed's #[folder], sqlx::migrate!, pest's #[grammar] -- so any
         # path-like string, or one passed to a macro or attribute, that names a
@@ -322,6 +373,9 @@ class Scanner:
             target = resolve(value)
             candidates = [target] if value.startswith("$CARGO_MANIFEST_DIR") else [target, join(self.crate, value), join(self.crate, f"src/{value}")]
             for candidate in candidates:
+                if candidate == "":
+                    whole_repository(value, m.start())
+                    break
                 module = submodule_of(candidate)
                 if module:
                     c.add(module)
@@ -330,9 +384,8 @@ class Scanner:
                     c.add(candidate)
                     break
         if follow_mods:
-            stem = posixpath.splitext(posixpath.basename(path))[0]
-            base = here if stem in ("mod", "lib", "main", "build") or follow_mods == "root" else join(here, stem)
             for m in MOD_DECL.finditer(text):
+                base = modules_at(m.start())
                 for candidate in (join(base, f"{m.group(1)}.rs"), join(base, f"{m.group(1)}/mod.rs")):
                     if candidate and c.tree.is_file(candidate):
                         c.add(candidate)
@@ -358,6 +411,7 @@ class Project:
         self.scanner = Scanner(self.c, sha)
         self.root = None
         self.tracked = set()
+        self.binaries = set()  # tracked crates that have a binary target
         # package name -> the packages it builds with (normal and build
         # dependencies), for each crate tracked: the roots of the lock closure.
         self.build_deps = {}
@@ -418,11 +472,11 @@ class Project:
             return c
         # Path entries the workspace shares with its members.
         for target in self.path_entries("", [table(self.root, "workspace", "dependencies"), *table(self.root, "patch").values()]):
-            self.track(target, manifests, published=False)
-        has_bin = False
+            self.track(target, manifests)
         for crate in crates:
-            has_bin |= self.track(crate, manifests, published=True)
-        if has_bin:
+            self.track(crate, manifests)
+        # A crate first reached as another's path dependency is still published.
+        if any(crate in self.binaries for crate in crates):
             for path in BINARY_BUILD_FILES:
                 if c.tree.is_file(path):
                     c.add(path)
@@ -459,10 +513,10 @@ class Project:
                     found.append(target)
         return found
 
-    def track(self, crate, manifests, published):
-        """Track one crate and the local crates it builds against; True if it has a binary."""
+    def track(self, crate, manifests):
+        """Track one crate and the local crates it builds against."""
         if crate in self.tracked:
-            return False
+            return
         self.tracked.add(crate)
         c = self.c
         manifest = manifests.get(crate)
@@ -471,10 +525,10 @@ class Project:
                 manifest = load_manifest(self.sha, crate)
             except tomllib.TOMLDecodeError as exc:
                 c.unresolved(f"{manifest_path(crate)} does not parse: {exc}")
-                return False
+                return
             if manifest is None:
                 c.unresolved(f"path dependency {crate or '.'} has no Cargo.toml")
-                return False
+                return
         c.add(manifest_path(crate))
         package = table(manifest, "package")
         ws_package = table(self.root, "workspace", "package")
@@ -493,6 +547,18 @@ class Project:
         outside = [r for r in roots if r and not r.startswith(f"{src}/")]
         for root in outside:
             c.add(root)
+        autobins = package.get("autobins", True) is not False
+        default_roots = [join(crate, "src/lib.rs"), join(crate, "src/main.rs")]
+        if autobins:
+            bin_dir = join(crate, "src/bin")
+            default_roots += [
+                f for f in c.tree.files
+                if f.startswith(f"{bin_dir}/") and f.endswith(".rs") and f[len(bin_dir) + 1 :].count("/") <= 1
+                and ("/" not in f[len(bin_dir) + 1 :] or f.endswith("/main.rs"))
+            ]
+        self.scanner.roots.update(r for r in roots + default_roots if r)
+        if bins or (autobins and (c.tree.is_file(join(crate, "src/main.rs")) or c.tree.is_dir(join(crate, "src/bin")))):
+            self.binaries.add(crate)
         self.scanner.crate = crate
         self.scanner.scan([f for f in c.tree.files if f.startswith(f"{src}/")])
         self.scanner.scan(outside, follow_mods="root")
@@ -523,12 +589,7 @@ class Project:
         if isinstance(package.get("name"), str):
             self.build_deps[package["name"]] = self.dependency_names(tables)
         for dep in self.path_entries(crate, tables):
-            self.track(dep, manifests, published=False)
-
-        if not published:
-            return False
-        autobins = package.get("autobins", True) is not False
-        return bool(bins) or (autobins and (c.tree.is_file(join(crate, "src/main.rs")) or c.tree.is_dir(join(crate, "src/bin"))))
+            self.track(dep, manifests)
 
     def build_script(self, crate, package):
         """Track a build script and the inputs it declares through `cargo:rerun-if-changed`."""
@@ -543,6 +604,7 @@ class Project:
             return
         c.add(path)
         self.scanner.crate = crate
+        self.scanner.roots.add(path)  # the build script is its own crate root
         self.scanner.scan([path], follow_mods=True)
         text = strip_comments(read_files(self.sha, [path]).get(path, ""))
         declared = False
@@ -558,6 +620,8 @@ class Project:
                     )
                 elif target.startswith("/") or join(crate, target) is None:
                     c.unresolved(f"{path}: rerun-if-changed={target} is outside the repository")
+                elif join(crate, target) == "":
+                    c.unresolved(f"{path}: rerun-if-changed={target} names the whole repository; add its inputs to 'paths'")
                 else:
                     c.add(join(crate, target))
         # Any rerun-if directive replaces cargo's default of rerunning the script

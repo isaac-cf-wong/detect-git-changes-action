@@ -191,6 +191,33 @@ class SourceScanTest(CrateTest):
             {"Cargo.toml", "lib/root.rs", "lib/helper.rs", "lib/nested/mod.rs", "lib/nested/leaf.rs"},
         )
 
+    def test_whole_crate_embedded_by_a_root_crate_is_unresolved(self):
+        c = self.resolve({"Cargo.toml": CRATE, "src/lib.rs": 'static D: Dir = include_dir!("$CARGO_MANIFEST_DIR");\n'})
+        self.assertTrue(any("whole repository" in p for p in c.problems), c.problems)
+
+    def test_module_inside_an_inline_module(self):
+        self.assert_matches(
+            {
+                "Cargo.toml": CRATE + '[lib]\npath = "lib/root.rs"\n',
+                "lib/root.rs": "mod inline {\n    const S: &str = \"}\";\n    const C: char = '}';\n    pub mod child;\n}\nmod top;\n",
+                "lib/inline/child.rs": "",
+                "lib/child.rs": "",
+                "lib/top.rs": "",
+            },
+            {"Cargo.toml", "lib/root.rs", "lib/inline/child.rs", "lib/top.rs"},
+        )
+
+    def test_path_attribute_inside_an_inline_module(self):
+        self.assert_matches(
+            {
+                "Cargo.toml": CRATE,
+                "src/lib.rs": 'mod outer {\n    #[path = "../../extra/x.rs"]\n    mod x;\n}\n',
+                "extra/x.rs": "",
+            },
+            # Inside an inline module of a mod-rs file, the base is src/outer/.
+            {"Cargo.toml", "src/lib.rs", "extra/x.rs"},
+        )
+
     def test_concat_in_a_macro_becomes_a_glob(self):
         self.assert_matches(
             {
@@ -302,6 +329,30 @@ class BuildScriptTest(CrateTest):
             {"Cargo.toml", "src/lib.rs", "build.rs", "proto/msg.proto", "schemas/a.json"},
         )
 
+    def test_whole_crate_as_input(self):
+        # A member crate's directory is tracked whole; the root crate's would be
+        # the whole repository, which is the same as not knowing.
+        c = self.resolve(
+            {
+                "Cargo.toml": CRATE,
+                "src/lib.rs": "",
+                "build.rs": 'fn main() { println!("cargo:rerun-if-changed=."); }\n',
+                "schema": "",
+            }
+        )
+        self.assertTrue(any("whole repository" in p for p in c.problems), c.problems)
+        c = self.resolve(
+            {
+                "Cargo.toml": '[workspace]\nmembers = ["gen"]\n',
+                "gen/Cargo.toml": '[package]\nname = "gen"\n',
+                "gen/src/lib.rs": "",
+                "gen/build.rs": 'fn main() { println!("cargo:rerun-if-changed=."); }\n',
+                "gen/schema": "",
+            }
+        )
+        self.assertEqual(c.problems, [])
+        self.assertIn("gen/schema", self.matched(c))
+
     def test_custom_build_script_path(self):
         self.assert_matches(
             {
@@ -386,6 +437,23 @@ class WorkspaceTest(CrateTest):
                 "libs/shared/src/lib.rs",
             },
         )
+
+    def test_published_binary_reached_first_as_a_workspace_dependency(self):
+        c = self.resolve(
+            {
+                "Cargo.toml": '[workspace]\nmembers = ["app", "common"]\n'
+                '[workspace.dependencies]\ncommon = { path = "common" }\n',
+                "Cargo.lock": "",
+                ".cargo/config.toml": "",
+                "app/Cargo.toml": '[package]\nname = "app"\n[dependencies]\ncommon.workspace = true\n',
+                "app/src/lib.rs": "",
+                "common/Cargo.toml": '[package]\nname = "common"\n',
+                "common/src/lib.rs": "",
+                "common/src/main.rs": "",
+            }
+        )
+        self.assertEqual(c.problems, [])
+        self.assertTrue({"Cargo.lock", ".cargo/config.toml"} <= self.matched(c))
 
     def test_a_workspace_of_unpublished_crates_tracks_them_all(self):
         c = self.resolve(

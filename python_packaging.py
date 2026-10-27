@@ -31,6 +31,10 @@ import tomllib
 import warnings
 
 PYPROJECT = "pyproject.toml"
+HATCH_TOML = "hatch.toml"
+# License files backends include by default; the entrypoint tracks the same
+# patterns, and these are here so symlinks among them are followed.
+DEFAULT_LICENSE_GLOBS = ["LICEN[CS]E*", "LICEN[CS]ES/**", "COPYING*", "NOTICE*", "AUTHORS*"]
 UNRESOLVED = 3
 
 # Key paths whose contents reach the built wheel/sdist or its metadata. Anything
@@ -94,9 +98,22 @@ def git_show(sha, path):
 
 
 def load(sha):
-    """Parse pyproject.toml at a revision; None when the file does not exist there."""
+    """Parse pyproject.toml at a revision; None when the file does not exist there.
+
+    A hatch.toml beside it is merged into [tool.hatch] the way hatchling does:
+    each of its top-level tables replaces the one of the same name.
+    """
     text = git_show(sha, PYPROJECT)
-    return None if text is None else tomllib.loads(text)
+    if text is None:
+        return None
+    data = tomllib.loads(text)
+    hatch_text = git_show(sha, HATCH_TOML)
+    if hatch_text is not None:
+        tool = data.setdefault("tool", {})
+        if isinstance(tool, dict):
+            hatch = tool.get("hatch")
+            tool["hatch"] = {**(hatch if isinstance(hatch, dict) else {}), **tomllib.loads(hatch_text)}
+    return data
 
 
 class Tree:
@@ -1102,7 +1119,7 @@ def read_setup_py(cfg, text, c):
             spec = {key: literal(args[key], f"{call_name(node)}({key}=...)") for key in args}
             if None not in spec.values():
                 cfg.packages = Find(
-                    [spec.get("where", ".")],
+                    str_list(spec.get("where", ".")),
                     spec.get("include", ("*",)),
                     spec.get("exclude", ()),
                     namespaces=call_name(node) == "find_namespace_packages",
@@ -1192,7 +1209,10 @@ def setuptools(c, data, sha):
         return
 
     if isinstance(cfg.packages, Find):
-        for d in cfg.packages.dirs(c.tree):
+        dirs = cfg.packages.dirs(c.tree)
+        if not dirs and not cfg.py_modules and not cfg.sources:
+            c.unresolved(f"setuptools: package discovery under {', '.join(cfg.packages.where)} matched no package directories")
+        for d in dirs:
             c.add(d)
     elif cfg.packages:
         for d in minimal(cfg.package_path(name) for name in cfg.packages):
@@ -1295,6 +1315,15 @@ def maturin(c, data, sha):
     crate = posixpath.dirname(manifest) if isinstance(manifest, str) else ""
     if crate:
         c.add(crate)
+        # Cargo looks upwards from the crate for the workspace it belongs to,
+        # whose manifest and lock file then shape the build.
+        parent = crate
+        while parent:
+            parent = posixpath.dirname(parent)
+            for name in ("Cargo.toml", "Cargo.lock"):
+                path = posixpath.join(parent, name) if parent else name
+                if c.tree.is_file(path):
+                    c.add(path)
     else:
         # The crate at the repository root: its manifest, lock file, build
         # script and Rust sources.
@@ -1385,8 +1414,8 @@ def declared_paths(c, data):
     if isinstance(license_, dict):
         c.add(license_.get("file"))
     # PEP 639 globs; `**` matches across directories, as git's glob magic does.
-    for pattern in str_list(project.get("license-files")):
-        c._append(f":(glob){pattern}")
+    for pattern in str_list(project.get("license-files")) + DEFAULT_LICENSE_GLOBS:
+        c.add_glob(pattern)
 
 
 def package_paths(sha):
@@ -1394,7 +1423,7 @@ def package_paths(sha):
     try:
         data = load(sha)
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
-        c.unresolved(f"{PYPROJECT} at {sha[:12]} does not parse: {exc}")
+        c.unresolved(f"{PYPROJECT} or {HATCH_TOML} at {sha[:12]} does not parse: {exc}")
         return c
     data = data or {}
     if not data and not any(c.tree.is_file(f) for f in ("setup.py", "setup.cfg")):
@@ -1421,7 +1450,7 @@ def main(argv):
         try:
             return 0 if material(base_sha, head_sha) else 1
         except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
-            print(f"Cannot parse {PYPROJECT}: {exc}", file=sys.stderr)
+            print(f"Cannot parse {PYPROJECT} or {HATCH_TOML}: {exc}", file=sys.stderr)
             return 2
 
     paths, problems = [], []

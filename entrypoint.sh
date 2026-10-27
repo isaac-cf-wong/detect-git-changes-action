@@ -12,11 +12,15 @@ split_list() {
 	tr ',' '\n' <<<"${1}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sed '/^$/d'
 }
 
-# Write the three outputs. Arguments are the changed files, one per argument.
+# Write the three outputs. Arguments are the changed files, one per argument;
+# --first-release alone reports a change with no files to compare against.
 write_outputs() {
 	local delimiter
 	delimiter="EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-	if [[ $# -gt 0 ]]; then
+	if [[ "${1:-}" == "--first-release" ]]; then
+		shift
+		echo "has_changes=true" >>"${GITHUB_OUTPUT}"
+	elif [[ $# -gt 0 ]]; then
 		echo "has_changes=true" >>"${GITHUB_OUTPUT}"
 	else
 		echo "has_changes=false" >>"${GITHUB_OUTPUT}"
@@ -46,8 +50,7 @@ if [[ "${INPUT_USE_LATEST_TAG:-false}" == "true" ]]; then
 	BASE_REF=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 	if [[ -z "$BASE_REF" ]]; then
 		echo "No tags found → treating as first release (has changes = true)"
-		echo "has_changes=true" >>"$GITHUB_OUTPUT"
-		echo "changed_files_count=0" >>"$GITHUB_OUTPUT"
+		write_outputs --first-release
 		exit 0
 	fi
 	echo "::notice::Using latest tag as base: $BASE_REF"
@@ -90,9 +93,12 @@ while IFS= read -r p; do
 done < <(split_list "${INPUT_PATHS:-}")
 
 # Git takes one magic signature per pathspec, so an entry that already carries
-# long-form magic such as ":(glob)docs/**" gets "exclude" merged into it.
+# long-form magic such as ":(glob)docs/**" gets "exclude" merged into it, and
+# the short exclude forms ":!docs/" and ":^docs/" are taken as already excluding.
 while IFS= read -r p; do
-	if [[ "${p}" == ":("* ]]; then
+	if [[ "${p}" == ":!"* || "${p}" == ":^"* ]]; then
+		excludes+=(":(exclude)${p:2}")
+	elif [[ "${p}" == ":("* ]]; then
 		excludes+=(":(exclude,${p#:(}")
 	else
 		excludes+=(":(exclude)${p}")
@@ -100,12 +106,16 @@ while IFS= read -r p; do
 done < <(split_list "${INPUT_EXCLUDE_PATHS:-}")
 
 HAS_TOMLLIB=false
+# Whether a pyproject.toml/hatch.toml change outside the packaging tables may be
+# dropped: not when every file counts, which must hold for those files too.
+NARROW_CONFIG=false
 if [[ "${PRESET}" == "python" ]]; then
-	# Files that shape the build whatever the backend: pyproject.toml (narrowed
-	# below to its packaging tables), the setuptools/hatch/pdm build scripts and
+	# Files that shape the build whatever the backend: pyproject.toml and
+	# hatch.toml (narrowed below to their packaging tables), the setuptools/hatch/pdm build scripts and
 	# manifests, and the license files backends pick up by default.
 	preset_paths=(
 		"pyproject.toml"
+		"hatch.toml"
 		"setup.py"
 		"setup.cfg"
 		"MANIFEST.in"
@@ -134,15 +144,17 @@ if [[ "${PRESET}" == "python" ]]; then
 		rm -f "${problems_file}"
 		[[ ${rc} -eq 0 ]] && sources_found=true
 	else
-		echo "::warning::Python 3.11+ (tomllib) not found; the python preset cannot read the build configuration, and treats any pyproject.toml or README* change as material"
+		echo "::warning::Python 3.11+ (tomllib) not found; the python preset cannot read the build configuration, so every changed file counts, or, with 'paths' set, 'paths' plus any pyproject.toml, hatch.toml or README* change"
 		preset_paths+=(":(glob)README*")
 	fi
 
 	if [[ "${sources_found}" == "true" ]]; then
 		includes+=("${preset_paths[@]}")
+		NARROW_CONFIG=${HAS_TOMLLIB}
 	elif [[ ${#includes[@]} -gt 0 ]]; then
 		echo "::warning::python preset: package sources not fully located; relying on 'paths' for them"
 		includes+=("${preset_paths[@]}")
+		NARROW_CONFIG=${HAS_TOMLLIB}
 	else
 		# Missing a release is worse than an extra one, so with nothing to go
 		# on every file counts. Setting 'paths' to the package sources fixes it.
@@ -167,16 +179,14 @@ fi
 
 changed=()
 while IFS= read -r f; do
-	if [[ "${PRESET}" == "python" && "${f}" == "pyproject.toml" ]]; then
-		if [[ "${HAS_TOMLLIB}" == "true" ]]; then
-			rc=0
-			"${PYTHON}" "${ACTION_DIR}/python_packaging.py" material "${BASE_SHA}" "${HEAD_SHA}" </dev/null || rc=$?
-			if [[ ${rc} -eq 1 ]]; then
-				echo "pyproject.toml changed outside its packaging tables → not material"
-				continue
-			elif [[ ${rc} -ne 0 ]]; then
-				echo "::warning::Could not compare pyproject.toml packaging tables; treating the change as material"
-			fi
+	if [[ "${NARROW_CONFIG}" == "true" && ("${f}" == "pyproject.toml" || "${f}" == "hatch.toml") ]]; then
+		rc=0
+		"${PYTHON}" "${ACTION_DIR}/python_packaging.py" material "${BASE_SHA}" "${HEAD_SHA}" </dev/null || rc=$?
+		if [[ ${rc} -eq 1 ]]; then
+			echo "${f} changed outside its packaging tables → not material"
+			continue
+		elif [[ ${rc} -ne 0 ]]; then
+			echo "::warning::Could not compare the ${f} packaging tables; treating the change as material"
 		fi
 	fi
 	changed+=("${f}")

@@ -42,7 +42,9 @@ out with `exclude-paths`. Both take
 [git pathspecs](https://git-scm.com/docs/gitglossary#Documentation/gitglossary.txt-aiddefpathspecapathspec),
 separated by commas or newlines. A plain entry such as `docs/` matches
 everything under it; prefix an entry with `:(glob)` for shell-style globbing
-where `*` stays within one directory and `**` crosses directories.
+where `*` stays within one directory and `**` crosses directories. In
+`exclude-paths` an entry is excluded as given; the short forms `:!docs/` and
+`:^docs/` mean the same as `docs/`.
 
 ```yaml
 - name: Detect changes in docs
@@ -91,7 +93,7 @@ them should trigger a release.
 | Tracked                                                                  | Why                              |
 | ------------------------------------------------------------------------ | -------------------------------- |
 | The package sources the build backend selects (see below)                | The package itself.              |
-| `pyproject.toml` (packaging tables only, see below)                      | Metadata, dependencies, build.   |
+| `pyproject.toml`, `hatch.toml` (packaging tables only, see below)        | Metadata, dependencies, build.   |
 | `setup.py`, `setup.cfg`, `MANIFEST.in`, `hatch_build.py`, `pdm_build.py` | Build scripts and manifests.     |
 | `readme`, `license` and `license-files` in pyproject.toml                | Shipped in the package metadata. |
 | Files dynamic metadata is read from (see below)                          | Version, dependencies, readme.   |
@@ -140,14 +142,16 @@ count as not located.
 Package sources are located per build backend:
 
 - **hatchling**: `packages`, `only-include`, `include` and `force-include` under
-  `[tool.hatch.build]` or `[tool.hatch.build.targets.wheel]`, plus the wheel's
+  `[tool.hatch.build]` or `[tool.hatch.build.targets.wheel]` (or the same tables
+  in `hatch.toml`, which hatchling merges over them), plus the wheel's
   `shared-data`, `shared-scripts` and `extra-metadata`; otherwise hatchling's
   default, a package named after the project at the root or under `src/`.
 - **setuptools**: `packages` (lists, `find:` and `find_packages()`),
   `package-dir`, `py-modules`, extension `sources` and `data-files` from
   `[tool.setuptools]`, `setup.cfg` `[options]` and the `setup()` call in
-  `setup.py`; otherwise setuptools' src-layout / flat-layout auto-discovery.
-  Also used when there is no `[build-system]` table.
+  `setup.py`; otherwise setuptools' src-layout / flat-layout auto-discovery. A
+  `find` that matches no package directory counts as not located. Also used when
+  there is no `[build-system]` table.
 - **poetry-core**: `[tool.poetry]` `packages` and wheel `include`s; otherwise a
   package named after the project.
 - **flit-core**: `[tool.flit.module]` `name`, or the project name.
@@ -155,7 +159,9 @@ Package sources are located per build backend:
   `src/` when it exists), plus `wheel-data`.
 - **uv_build**: `[tool.uv.build-backend]` `module-root` and `module-name`.
 - **maturin**: `Cargo.toml`, `Cargo.lock`, `build.rs` and `src/` (or the
-  `manifest-path` crate), plus `python-source` and `data`.
+  `manifest-path` crate, with the `Cargo.toml` and `Cargo.lock` of any directory
+  above it, where a Cargo workspace keeps them), plus `python-source` and
+  `data`.
 
 When the sources cannot be located, the action warns and says why: a `setup.py`
 that computes its arguments, a build hook (a hatch custom hook, `pdm_build.py`,
@@ -173,24 +179,26 @@ with:
     paths: cpp/ # native sources of a scikit-build-core project
 ```
 
-A change to `pyproject.toml` counts only when it touches a table that reaches
-the built distribution: `[build-system]`, `[project]`, and the build backend's
-own configuration (`[tool.hatch.build]`, `[tool.hatch.version]`,
+A change to `pyproject.toml` or `hatch.toml` counts only when it touches a table
+that reaches the built distribution: `[build-system]`, `[project]`, and the
+build backend's own configuration (`[tool.hatch.build]`, `[tool.hatch.version]`,
 `[tool.hatch.metadata]`, `[tool.setuptools]`, `[tool.setuptools_scm]`,
 `[tool.flit]`, `[tool.pdm.build]`, `[tool.pdm.version]`, `[tool.maturin]`,
 `[tool.scikit-build]`, `[tool.meson-python]`, `[tool.uv.build-backend]`, and
 `[tool.poetry]` apart from its dependency groups). Edits to
 `[dependency-groups]`, `[tool.ruff]`, `[tool.pytest]`, hatch environments and
 similar development-only tables do not, so routine dev-dependency bumps no
-longer look like a release.
+longer look like a release. When every changed file counts because the sources
+were not located, this narrowing is off too, and any change to them counts.
 
 Not tracked: `uv.lock` and other lock files (not shipped in a wheel), tests,
 docs, CI workflows and tool configuration files.
 
 Reading the build configuration needs Python 3.11 or later (`tomllib`) on the
 runner, which GitHub-hosted runners provide; without it the sources count as not
-located, as above, and any change to `pyproject.toml` or `README*` counts. A
-`pyproject.toml` that cannot be parsed is treated as material.
+located, as above: every changed file counts, or, with `paths` set, `paths` and
+any change to `pyproject.toml`, `hatch.toml` or `README*`. A `pyproject.toml`
+that cannot be parsed is treated as material.
 
 ## Inputs
 
@@ -212,8 +220,9 @@ located, as above, and any change to `pyproject.toml` or `README*` counts. A
 | `changed-files`       | Newline-separated list of the changed files that count. |
 
 A file renamed or moved counts under both its old and its new path, so moving a
-file out of a tracked directory is detected. The changed files are also written
-to the job summary.
+file out of a tracked directory is detected. With `use-latest-tag` and no tag
+yet, the first release is reported as a change with no files listed. The changed
+files are also written to the job summary.
 
 ## Important Notes
 

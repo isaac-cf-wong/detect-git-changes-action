@@ -39,6 +39,8 @@ teardown() {
 
 	[ "$status" -eq 0 ]
 	grep "has_changes=true" "$GITHUB_OUTPUT"
+	grep "changed_files_count=0" "$GITHUB_OUTPUT"
+	grep "^changed_files<<" "$GITHUB_OUTPUT"
 }
 
 @test "identifies latest tag as base" {

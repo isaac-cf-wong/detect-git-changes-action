@@ -83,6 +83,17 @@ class LayoutTest(unittest.TestCase):
 
 
 class HatchTest(LayoutTest):
+    def test_hatch_toml_configures_the_build(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "demo"\n',
+                "hatch.toml": '[build.targets.wheel]\npackages = ["lib/actual"]\n',
+                "demo/__init__.py": "",
+                "lib/actual/__init__.py": "",
+            },
+            {"lib/actual/__init__.py"},
+        )
+
     def test_default_src_layout(self):
         self.assert_matches(
             {
@@ -363,6 +374,29 @@ class SetuptoolsTest(LayoutTest):
             },
             {"lib/pkg/__init__.py"},
         )
+
+    def test_setup_py_find_packages_with_a_list_where(self):
+        for call in ('find_packages(where=["src"])', 'find_packages(["src"])', 'find_namespace_packages(where=["src"])'):
+            with self.subTest(call=call):
+                self.assert_matches(
+                    {
+                        "setup.py": "from setuptools import find_packages, find_namespace_packages, setup\n"
+                        f'setup(name="x", package_dir={{"": "src"}}, packages={call})\n',
+                        "src/pkg/__init__.py": "",
+                    },
+                    {"src/pkg/__init__.py"},
+                )
+
+    def test_find_that_matches_nothing_is_unresolved(self):
+        for files in (
+            {"setup.py": 'from setuptools import find_packages, setup\nsetup(name="x", packages=find_packages(where="nosuch"))\n'},
+            {
+                "pyproject.toml": SETUPTOOLS + '[project]\nname = "x"\n[tool.setuptools.packages.find]\nwhere = ["nosuch"]\n',
+            },
+        ):
+            with self.subTest(files=files):
+                c = self.resolve({**files, "lib/pkg/__init__.py": ""})
+                self.assertTrue(any("matched no package" in p for p in c.problems), c.problems)
 
     def test_setup_py_only_with_find_packages(self):
         self.assert_matches(
@@ -1322,6 +1356,20 @@ class OtherBackendsTest(LayoutTest):
             {"Cargo.toml", "Cargo.lock", "src/lib.rs", "python/x/__init__.py", "x.data/scripts/x-tool"},
         )
 
+    def test_maturin_workspace_member_tracks_the_workspace_manifest_and_lock(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": '[build-system]\nbuild-backend = "maturin"\n[project]\nname = "x"\n'
+                '[tool.maturin]\nmanifest-path = "crates/x/Cargo.toml"\n',
+                "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\n',
+                "Cargo.lock": "",
+                "crates/x/Cargo.toml": "",
+                "crates/x/src/lib.rs": "",
+                "crates/other/src/lib.rs": "",
+            },
+            {"Cargo.toml", "Cargo.lock", "crates/x/Cargo.toml", "crates/x/src/lib.rs"},
+        )
+
     def test_scikit_build_is_unresolved_but_tracks_cmake(self):
         c = self.resolve(
             {
@@ -1359,6 +1407,31 @@ class DeclaredFilesTest(LayoutTest):
         )
 
 
+    def test_license_files_glob_follows_symlinks(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\nlicense-files = ["LICENSES/**"]\n'
+                "[tool.hatch.build.targets.wheel]\npackages = [\"x\"]\n",
+                "x/__init__.py": "",
+                "shared/MIT.txt": "",
+            },
+            {"x/__init__.py", "LICENSES/MIT.txt", "shared/MIT.txt"},
+            links={"LICENSES/MIT.txt": "../shared/MIT.txt"},
+        )
+
+    def test_default_license_file_follows_symlinks(self):
+        c = self.resolve(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n[tool.hatch.build.targets.wheel]\npackages = ["x"]\n',
+                "x/__init__.py": "",
+                "legal/terms.txt": "",
+            },
+            links={"LICENSE": "legal/terms.txt"},
+        )
+        self.assertEqual(c.problems, [])
+        self.assertIn("legal/terms.txt", self.matched(c))
+
+
 class CommandTest(LayoutTest):
     def test_package_paths_covers_both_revisions(self):
         base = self.commit(
@@ -1383,6 +1456,18 @@ class CommandTest(LayoutTest):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn(":(literal)lib/x", out.stdout.split())
         self.assertIn(":(literal)src/x", out.stdout.split())
+
+    def test_material_reads_hatch_toml(self):
+        base = self.commit(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n',
+                "hatch.toml": '[build.targets.wheel]\npackages = ["x"]\n[envs.default]\ndependencies = ["pytest"]\n',
+            }
+        )
+        envs_only = self.commit({"hatch.toml": '[build.targets.wheel]\npackages = ["x"]\n[envs.default]\ndependencies = ["pytest>=8"]\n'})
+        build = self.commit({"hatch.toml": '[build.targets.wheel]\npackages = ["y"]\n[envs.default]\ndependencies = ["pytest>=8"]\n'})
+        self.assertFalse(python_packaging.material(base, envs_only))
+        self.assertTrue(python_packaging.material(envs_only, build))
 
     def test_package_paths_exit_code_when_unresolved(self):
         sha = self.commit({"setup.py": "from setuptools import setup\nsetup(**CONFIG)\n"})

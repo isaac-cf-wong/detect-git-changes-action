@@ -132,6 +132,21 @@ teardown() {
 	[ "$(output_value changed_files_count)" = "0" ]
 }
 
+@test "exclude-paths honours the short exclude forms :! and :^" {
+	echo "more" >>docs/index.md
+	echo "y = 2" >>src/demo/__init__.py
+	commit_all "docs and src"
+
+	for form in ":!docs/" ":^docs/"; do
+		: >"$GITHUB_OUTPUT"
+		export INPUT_EXCLUDE_PATHS="${form}"
+		run bash "$SCRIPT_PATH"
+
+		[ "$status" -eq 0 ]
+		[ "$(changed_files)" = "src/demo/__init__.py" ]
+	done
+}
+
 @test "exclude-paths honours pathspec magic such as :(glob)" {
 	mkdir -p docs/deep
 	echo "more" >>docs/index.md
@@ -352,9 +367,9 @@ teardown() {
 	[ "$(output_value has_changes)" = "false" ]
 }
 
-@test "python preset: falls back to any pyproject.toml change when tomllib is unavailable" {
-	sed -i.bak 's/ruff>=0.17.0/ruff>=0.17.3/' pyproject.toml && rm pyproject.toml.bak
-	commit_all "bump ruff"
+@test "python preset: without tomllib and paths, every changed file counts" {
+	echo "more" >>docs/index.md
+	commit_all "docs"
 
 	export INPUT_PRESET="python"
 	export DETECT_CHANGES_PYTHON="/nonexistent/python3"
@@ -363,7 +378,30 @@ teardown() {
 
 	[ "$status" -eq 0 ]
 	[ "$(output_value has_changes)" = "true" ]
-	[[ "$output" == *"::warning::"* ]]
+	[ "$(changed_files)" = "docs/index.md" ]
+	grep -q '^::warning::Python 3.11+.*every changed file counts' <<<"$output"
+}
+
+@test "python preset: without tomllib, paths stands in and any pyproject.toml change counts" {
+	echo "more" >>docs/index.md
+	commit_all "docs"
+
+	export INPUT_PRESET="python"
+	export INPUT_PATHS="src/"
+	export DETECT_CHANGES_PYTHON="/nonexistent/python3"
+	run bash "$SCRIPT_PATH"
+
+	[ "$status" -eq 0 ]
+	[ "$(output_value has_changes)" = "false" ]
+
+	sed -i.bak 's/ruff>=0.17.0/ruff>=0.17.3/' pyproject.toml && rm pyproject.toml.bak
+	commit_all "bump ruff"
+	run bash "$SCRIPT_PATH"
+	unset DETECT_CHANGES_PYTHON
+
+	[ "$status" -eq 0 ]
+	[ "$(output_value has_changes)" = "true" ]
+	[ "$(changed_files)" = "pyproject.toml" ]
 }
 
 @test "unknown preset fails with an error" {
@@ -424,6 +462,43 @@ teardown() {
 	[ "$(output_value has_changes)" = "true" ]
 	[ "$(changed_files)" = "docs/index.md" ]
 	[[ "$output" == *"::warning::python preset: setup.py"* ]]
+}
+
+@test "python preset: when every file counts, a tooling-only pyproject.toml change counts too" {
+	sed -i.bak 's/hatchling.build/mystery.backend/' pyproject.toml && rm pyproject.toml.bak
+	commit_all "a backend the preset does not know"
+	git tag v0.2.0
+	sed -i.bak 's/line-length = 120/line-length = 100/' pyproject.toml && rm pyproject.toml.bak
+	commit_all "ruff config"
+
+	export INPUT_PRESET="python"
+	run bash "$SCRIPT_PATH"
+
+	[ "$status" -eq 0 ]
+	[ "$(output_value has_changes)" = "true" ]
+	[ "$(changed_files)" = "pyproject.toml" ]
+	[[ "$output" == *"mystery.backend"* ]]
+}
+
+@test "python preset: hatch.toml build config counts, its environments do not" {
+	printf '[envs.default]\ndependencies = ["pytest"]\n' >hatch.toml
+	commit_all "hatch.toml"
+	git tag v0.2.0
+	printf '[envs.default]\ndependencies = ["pytest>=8"]\n' >hatch.toml
+	commit_all "env bump"
+
+	export INPUT_PRESET="python"
+	run bash "$SCRIPT_PATH"
+
+	[ "$status" -eq 0 ]
+	[ "$(output_value has_changes)" = "false" ]
+
+	printf '[envs.default]\ndependencies = ["pytest>=8"]\n[build.targets.wheel]\nonly-include = ["src/demo"]\n' >hatch.toml
+	commit_all "build config"
+	run bash "$SCRIPT_PATH"
+
+	[ "$(output_value has_changes)" = "true" ]
+	[ "$(changed_files)" = "hatch.toml" ]
 }
 
 @test "python preset: paths stands in for sources that cannot be located" {

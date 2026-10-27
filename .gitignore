@@ -12,3 +12,4 @@ venv.bak/
 
 # Mac metadata files
 .DS_Store
+__pycache__/

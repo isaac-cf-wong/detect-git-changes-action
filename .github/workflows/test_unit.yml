@@ -22,4 +22,5 @@ jobs:
               run: |
                   chmod +x tests/unit/test_has_changes.sh
                   ./tests/unit/test_has_changes.sh
-                  bats tests/unit/test_latest_tag.bats
+                  bats tests/unit/*.bats
+                  python3 -m unittest discover -s tests/unit -p 'test_*.py' -v

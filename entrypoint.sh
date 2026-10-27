@@ -149,7 +149,7 @@ if [[ "${PRESET}" == "python" || "${PRESET}" == "rust" ]]; then
 		# The root manifest (narrowed below) and the license files cargo packages;
 		# the crates, their sources and inputs come from rust_packaging.py.
 		preset_paths=("Cargo.toml" "${license_paths[@]}")
-		fallback_paths=(":(glob)README*" ":(glob)**/Cargo.toml" "Cargo.lock")
+		fallback_paths=(":(glob)**/README*" ":(glob)**/Cargo.toml" "Cargo.lock")
 		fallback_note="any Cargo.toml, Cargo.lock or README* change"
 	fi
 	sources_found=false

@@ -196,6 +196,45 @@ class SourceScanTest(CrateTest):
     def test_explicit_bin_without_path_in_a_directory_is_a_crate_root(self):
         self.explicit_bin_root("src/bin/tool/main.rs")
 
+    def test_path_attribute_file_keeps_its_modules_beside_it(self):
+        # rustc treats a file loaded through #[path] like a mod.rs.
+        self.assert_matches(
+            {
+                "Cargo.toml": CRATE,
+                "src/lib.rs": '#[path = "../platform/unix.rs"]\nmod unix;\n',
+                "platform/unix.rs": "pub mod helper;\n",
+                "platform/helper.rs": "",
+                "platform/unix/helper.rs": "",
+            },
+            {"Cargo.toml", "src/lib.rs", "platform/unix.rs", "platform/helper.rs"},
+        )
+
+    def test_module_file_that_cannot_be_found_is_unresolved(self):
+        c = self.resolve(
+            {
+                "Cargo.toml": CRATE + '[lib]\npath = "lib/root.rs"\n',
+                "lib/root.rs": 'mod gone;\n#[path = "kept.rs"]\nmod renamed;\n',
+                "lib/kept.rs": "",
+            }
+        )
+        self.assertEqual([p for p in c.problems if "renamed" in p or "kept" in p], [])
+        self.assertTrue(any("gone" in p for p in c.problems), c.problems)
+
+    def test_quotes_in_char_literals_and_raw_strings_do_not_derail_the_scan(self):
+        self.assert_matches(
+            {
+                "Cargo.toml": CRATE,
+                "src/lib.rs": "const Q: char = '\"'; const URL: &str = \"https://example.com\"; "
+                'const A: &str = include_str!("../a.txt");\n'
+                'const J: &str = r#"{"url": "http://x"}"#; const B: &str = include_str!("../b.txt");\n'
+                "fn f<'a>(x: &'a str) -> &'a str { x } const C: &str = include_str!(\"../c.txt\");\n",
+                "a.txt": "",
+                "b.txt": "",
+                "c.txt": "",
+            },
+            {"Cargo.toml", "src/lib.rs", "a.txt", "b.txt", "c.txt"},
+        )
+
     def test_library_outside_src_tracks_its_modules(self):
         self.assert_matches(
             {

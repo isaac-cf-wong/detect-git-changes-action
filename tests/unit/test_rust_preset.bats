@@ -190,3 +190,20 @@ teardown() {
 	[ "$(output_value has_changes)" = "true" ]
 	grep -q '^::warning::Python 3.11+.*rust preset.*every changed file counts' <<<"$output"
 }
+
+@test "rust preset: without tomllib, a member crate's readme counts when paths is set" {
+	mkdir -p crates/app
+	echo "# app" >crates/app/README.md
+	commit_all "member readme"
+	git tag v0.2.0
+	echo "more" >>crates/app/README.md
+	commit_all "edit member readme"
+
+	export INPUT_PATHS="src/"
+	export DETECT_CHANGES_PYTHON="/nonexistent/python3"
+	run bash "$SCRIPT_PATH"
+
+	[ "$status" -eq 0 ]
+	[ "$(output_value has_changes)" = "true" ]
+	[ "$(changed_files)" = "crates/app/README.md" ]
+}

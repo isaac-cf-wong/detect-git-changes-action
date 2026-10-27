@@ -128,7 +128,7 @@ CONCAT_PART = re.compile(rf'\s*(?:(?:{STRING})|(?P<var>\$\w+)|(?P<env>env!\s*\(\
 PATH_ATTR = re.compile(rf"#\[\s*(?:cfg_attr\s*\([^\]]*?,\s*)?path\s*=\s*(?:{STRING})", re.S)
 MOD_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(?:r#)?(\w+)\s*;", re.M)
 INLINE_MOD = re.compile(r"\bmod\s+(?:r#)?(\w+)\s*\{")
-CHAR = re.compile(r"'(?:\\.|[^\\'\n])'")
+CHAR = re.compile(r"'(?:\\u\{[0-9a-fA-F]{1,6}\}|\\.|[^\\'\n])'")
 RERUN = re.compile(r"cargo::?rerun-if-changed=")
 # Stands for the crate's directory in a path: `$CARGO_MANIFEST_DIR` or `env!("CARGO_MANIFEST_DIR")`.
 CRATE_ROOT = "\0crate"
@@ -137,14 +137,30 @@ MACRO_OR_ATTRIBUTE_ARG = re.compile(r"(?:!\s*[(\[{]|#\[[^\]]*=)\s*$")
 RERUN_ENV = re.compile(r"cargo::?rerun-if-env-changed=")
 
 
+RAW_STRING_START = re.compile(r'b?r(#*)"')
+
+
 def strip_comments(text):
     """Rust source without its comments, keeping line breaks so line numbers hold.
 
-    String literals are skipped over, so a ``//`` inside one is kept.
+    String literals, raw strings included, are copied whole, so a ``//`` inside
+    one is kept. Char literals are blanked: their contents are never paths, and
+    a quote in one (``'"'``) would otherwise read as the start of a string. A
+    lone ``'`` (a lifetime or a label) is copied as it is.
     """
     out, i, n = [], 0, len(text)
     while i < n:
-        if text.startswith("//", i):
+        raw = RAW_STRING_START.match(text, i) if text[i] in "br" and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")) else None
+        char = CHAR.match(text, i) if text[i] == "'" else None
+        if raw:
+            end = text.find('"' + raw.group(1), raw.end())
+            end = n if end < 0 else end + 1 + len(raw.group(1))
+            out.append(text[i:end])
+            i = end
+        elif char:
+            out.append("'" + " " * (char.end() - i - 2) + "'")
+            i = char.end()
+        elif text.startswith("//", i):
             j = text.find("\n", i)
             i = n if j < 0 else j
         elif text.startswith("/*", i):
@@ -321,6 +337,9 @@ class Scanner:
                 return
             c.add(resolved)
             if resolved.endswith(".rs"):
+                if what == "#[path]":
+                    # rustc treats a file loaded through #[path] like a mod.rs.
+                    self.roots.add(resolved)
                 more.append((resolved, follow))
 
         handled = []  # spans of include_*! calls, whose strings are not read again below
@@ -353,6 +372,7 @@ class Scanner:
                     f"{path}:{line_of(text, m.start())}: {m.group('macro')}! with a path that is not a string"
                     " literal cannot be followed; add the files involved to 'paths'"
                 )
+        path_attrs = [m.start() for m in PATH_ATTR.finditer(text)]
         for m in PATH_ATTR.finditer(text):
             # At the top of a file, relative to its directory; inside inline
             # modules, to where those modules' children live.
@@ -385,12 +405,21 @@ class Scanner:
                     break
         if follow_mods:
             for m in MOD_DECL.finditer(text):
+                # A declaration carrying #[path] was followed above.
+                if any(p < m.start() and not re.search(r"[;{}]", text[p : m.start()]) for p in path_attrs):
+                    continue
                 base = modules_at(m.start())
-                for candidate in (join(base, f"{m.group(1)}.rs"), join(base, f"{m.group(1)}/mod.rs")):
-                    if candidate and c.tree.is_file(candidate):
-                        c.add(candidate)
-                        c.add(posixpath.dirname(candidate) if candidate.endswith("/mod.rs") else candidate[:-3])
-                        more.append((candidate, True))
+                candidates = (join(base, f"{m.group(1)}.rs"), join(base, f"{m.group(1)}/mod.rs"))
+                found = next((f for f in candidates if f and c.tree.is_file(f)), None)
+                if found is None:
+                    c.unresolved(
+                        f"{path}:{line_of(text, m.start())}: module {m.group(1)!r} is in none of"
+                        f" {', '.join(f for f in candidates if f)}; add the files involved to 'paths'"
+                    )
+                    continue
+                c.add(found)
+                c.add(posixpath.dirname(found) if found.endswith("/mod.rs") else found[:-3])
+                more.append((found, True))
         return more
 
 

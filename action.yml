@@ -20,7 +20,20 @@ inputs:
         required: false
         default: 'HEAD'
     paths:
-        description: 'Optional comma-separated paths/globs to limit comparison.'
+        description:
+            'Optional paths to limit the comparison to, as git pathspecs
+            separated by commas or newlines. Combined with the preset when one
+            is set.'
+        required: false
+    exclude-paths:
+        description:
+            'Optional paths to leave out of the comparison, as git pathspecs
+            separated by commas or newlines. Applied after paths and preset.'
+        required: false
+    preset:
+        description:
+            'Optional preset that tracks the files that materially affect a
+            package. Supported: python.'
         required: false
 
 outputs:
@@ -28,8 +41,13 @@ outputs:
         description: 'true if changes exist, false otherwise.'
         value: ${{ steps.detect.outputs.has_changes }}
     changed-files-count:
-        description: 'Approximate number of changed files.'
+        description: 'Number of changed files that count towards the verdict.'
         value: ${{ steps.detect.outputs.changed_files_count }}
+    changed-files:
+        description:
+            'Newline-separated list of the changed files that count towards the
+            verdict.'
+        value: ${{ steps.detect.outputs.changed_files }}
 
 runs:
     using: composite
@@ -56,3 +74,5 @@ runs:
               INPUT_USE_LATEST_TAG: ${{ inputs.use-latest-tag }}
               INPUT_HEAD_REF: ${{ inputs.head-ref }}
               INPUT_PATHS: ${{ inputs.paths }}
+              INPUT_EXCLUDE_PATHS: ${{ inputs.exclude-paths }}
+              INPUT_PRESET: ${{ inputs.preset }}

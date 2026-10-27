@@ -39,3 +39,26 @@ jobs:
               run: |
                   [[ "${{ steps.diff.outputs.has-changes }}" == "true" ]] || exit 1
                   [[ -n "${{ steps.diff.outputs.changed-files-count }}" ]] || exit 1
+
+            - name: Python preset – same ref
+              id: preset_same
+              uses: ./
+              with:
+                  base-ref: HEAD
+                  preset: python
+
+            - name: Assert preset reports no change for the same ref
+              run: |
+                  [[ "${{ steps.preset_same.outputs.has-changes }}" == "false" ]] || exit 1
+                  [[ "${{ steps.preset_same.outputs.changed-files-count }}" == "0" ]] || exit 1
+
+            - name: Exclude everything the last commit touched
+              id: excluded
+              uses: ./
+              with:
+                  base-ref: HEAD~1
+                  exclude-paths: ':(glob)**'
+
+            - name: Assert excluded changes do not count
+              run: |
+                  [[ "${{ steps.excluded.outputs.has-changes }}" == "false" ]] || exit 1

@@ -9,10 +9,39 @@ permissions:
     contents: write
 
 jobs:
+    check_changes:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+        outputs:
+            has-changes: ${{ steps.check_changes.outputs.has-changes }}
+        steps:
+            - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              with:
+                  fetch-depth: 0
+
+            # Release only when something users get changed: what a caller runs
+            # (the action definition, the scripts at the repository root, the
+            # license) or the documentation that explains how to use it, so a
+            # docs update reaches users through a release too. Tests, CI
+            # workflows and tooling config change neither. Root-level globs keep
+            # a newly added script or Markdown file covered without editing
+            # this list.
+            - name: Check for changes to the action or its documentation
+              id: check_changes
+              uses: ./
+              with:
+                  use-latest-tag: 'true'
+                  paths: 'action.yml,:(glob)*.sh,:(glob)*.py,LICENSE,:(glob)*.md,docs/'
+
     test_action:
+        needs: check_changes
+        if: needs.check_changes.outputs.has-changes == 'true'
         uses: ./.github/workflows/test_action.yml
 
     test_unit:
+        needs: check_changes
+        if: needs.check_changes.outputs.has-changes == 'true'
         uses: ./.github/workflows/test_unit.yml
 
     create_tag:
@@ -20,20 +49,12 @@ jobs:
         runs-on: ubuntu-latest
         outputs:
             new_tag: ${{ steps.tag_version.outputs.new_tag }}
-            has-changes: ${{ steps.check_commits.outputs.has-changes }}
         steps:
             - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
               with:
                   fetch-depth: 0
 
-            - name: Check for new commits
-              id: check_commits
-              uses: ./
-              with:
-                  use-latest-tag: 'true'
-
             - name: Bump version and push tag
-              if: steps.check_commits.outputs.has-changes == 'true'
               id: tag_version
               uses: mathieudutour/github-tag-action@a22cf08638b34d5badda920f9daf6e72c477b07b # v6.2
               with:
@@ -43,7 +64,6 @@ jobs:
                   tag_prefix: v
 
             - name: Output tag information
-              if: steps.check_commits.outputs.has-changes == 'true'
               run: |
                   echo "### Tag Created :rocket:" >> $GITHUB_STEP_SUMMARY
                   echo "- **New tag**: ${{ steps.tag_version.outputs.new_tag }}" >> $GITHUB_STEP_SUMMARY
@@ -52,7 +72,6 @@ jobs:
 
     release:
         needs: create_tag
-        if: needs.create_tag.outputs.has-changes == 'true'
         uses: ./.github/workflows/release.yml
         permissions:
             contents: write

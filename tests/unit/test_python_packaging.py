@@ -973,6 +973,22 @@ class SetuptoolsTest(LayoutTest):
         )
         self.assertTrue(any("helpers.py" in p for p in c.problems), c.problems)
 
+    def test_parse_warnings_do_not_reach_stderr(self):
+        sha = self.commit(
+            {
+                "setup.py": 'from setuptools import setup\nPATTERN = "\\d+"\nsetup(name="x", packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+            }
+        )
+        script = Path(python_packaging.__file__)
+        out = subprocess.run(
+            [sys.executable, "-W", "default", str(script), "package-paths", sha, sha],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stderr, "")
+
     def test_os_open_with_write_only_flags_is_not_a_read(self):
         self.assert_matches(
             {

@@ -28,6 +28,7 @@ import re
 import subprocess
 import sys
 import tomllib
+import warnings
 
 PYPROJECT = "pyproject.toml"
 UNRESOLVED = 3
@@ -703,6 +704,14 @@ def is_write_only_flags(flags):
     return "O_WRONLY" in names and "O_RDWR" not in names
 
 
+def parse(text):
+    """``ast.parse()``, without the SyntaxWarnings (e.g. invalid escapes) it prints
+    to stderr, where the action would show each as a warning about the preset."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return ast.parse(text)
+
+
 def scan_python(c, path, module=None, seen=None, imported=False):
     """Track what a Python file run at build time reads, or report that it cannot be told.
 
@@ -728,7 +737,7 @@ def scan_python(c, path, module=None, seen=None, imported=False):
         if text is None:
             return
         try:
-            module = ast.parse(text)
+            module = parse(text)
         except SyntaxError as exc:
             c.unresolved(f"{path} does not parse: {exc}")
             return
@@ -1047,7 +1056,7 @@ def scan_python(c, path, module=None, seen=None, imported=False):
 
 def read_setup_py(cfg, text, c):
     try:
-        module = ast.parse(text)
+        module = parse(text)
     except SyntaxError as exc:
         c.unresolved(f"setup.py does not parse: {exc}")
         return

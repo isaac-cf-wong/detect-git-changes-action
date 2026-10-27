@@ -2,6 +2,43 @@
 
 set -euo pipefail
 
+ACTION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="${DETECT_CHANGES_PYTHON:-python3}"
+PRESET="${INPUT_PRESET:-}"
+
+# Split a comma- and/or newline-separated list into one trimmed entry per line,
+# dropping empty entries.
+split_list() {
+	tr ',' '\n' <<<"${1}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | sed '/^$/d'
+}
+
+# Write the three outputs. Arguments are the changed files, one per argument.
+write_outputs() {
+	local delimiter
+	delimiter="EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+	if [[ $# -gt 0 ]]; then
+		echo "has_changes=true" >>"${GITHUB_OUTPUT}"
+	else
+		echo "has_changes=false" >>"${GITHUB_OUTPUT}"
+	fi
+	echo "changed_files_count=$#" >>"${GITHUB_OUTPUT}"
+	{
+		echo "changed_files<<${delimiter}"
+		if [[ $# -gt 0 ]]; then
+			printf '%s\n' "$@"
+		fi
+		echo "${delimiter}"
+	} >>"${GITHUB_OUTPUT}"
+}
+
+case "${PRESET}" in
+"" | none | python) ;;
+*)
+	echo "::error::Unknown preset '${PRESET}'. Supported presets: python" >&2
+	exit 1
+	;;
+esac
+
 # ────────────────────────────────────────────────
 # Resolve effective BASE ref
 # ────────────────────────────────────────────────
@@ -19,7 +56,6 @@ else
 fi
 
 HEAD_REF="${INPUT_HEAD_REF:-HEAD}"
-PATHS="${INPUT_PATHS:-}"
 
 echo "Comparing ${BASE_REF} ... ${HEAD_REF}"
 
@@ -39,34 +75,125 @@ fi
 
 if [[ "${BASE_SHA}" == "${HEAD_SHA}" ]]; then
 	echo "Refs point to the same commit → no changes"
-	echo "has_changes=false" >>"${GITHUB_OUTPUT}"
-	echo "changed_files_count=0" >>"${GITHUB_OUTPUT}"
+	write_outputs
 	exit 0
 fi
 
-# Build diff command
-diff_cmd=(git diff --quiet --exit-code "${BASE_SHA}" "${HEAD_SHA}")
-count_cmd=(git diff --name-only "${BASE_SHA}" "${HEAD_SHA}")
+# ────────────────────────────────────────────────
+# Build the pathspec: preset + paths, minus exclude-paths
+# ────────────────────────────────────────────────
+includes=()
+excludes=()
 
-if [[ -n "${PATHS}" ]]; then
-	IFS=',' read -ra path_array <<<"${PATHS}"
-	diff_cmd+=(--)
-	count_cmd+=(--)
-	for p in "${path_array[@]}"; do
-		diff_cmd+=("${p}")
-		count_cmd+=("${p}")
-	done
+while IFS= read -r p; do
+	includes+=("${p}")
+done < <(split_list "${INPUT_PATHS:-}")
+
+# Git takes one magic signature per pathspec, so an entry that already carries
+# long-form magic such as ":(glob)docs/**" gets "exclude" merged into it.
+while IFS= read -r p; do
+	if [[ "${p}" == ":("* ]]; then
+		excludes+=(":(exclude,${p#:(}")
+	else
+		excludes+=(":(exclude)${p}")
+	fi
+done < <(split_list "${INPUT_EXCLUDE_PATHS:-}")
+
+HAS_TOMLLIB=false
+if [[ "${PRESET}" == "python" ]]; then
+	# Files that shape the build whatever the backend: pyproject.toml (narrowed
+	# below to its packaging tables), the setuptools/hatch/pdm build scripts and
+	# manifests, and the license files backends pick up by default.
+	preset_paths=(
+		"pyproject.toml"
+		"setup.py"
+		"setup.cfg"
+		"MANIFEST.in"
+		"hatch_build.py"
+		"pdm_build.py"
+		":(glob)LICEN[CS]E*"
+		":(glob)LICEN[CS]ES/**"
+		":(glob)COPYING*"
+		":(glob)NOTICE*"
+		":(glob)AUTHORS*"
+	)
+	sources_found=false
+	if "${PYTHON}" -c 'import tomllib' >/dev/null 2>&1; then
+		HAS_TOMLLIB=true
+		# The package sources, located from the build backend's configuration,
+		# and the readme and license files pyproject.toml declares.
+		problems_file=$(mktemp)
+		rc=0
+		located=$("${PYTHON}" "${ACTION_DIR}/python_packaging.py" package-paths "${BASE_SHA}" "${HEAD_SHA}" 2>"${problems_file}") || rc=$?
+		while IFS= read -r p; do
+			[[ -n "${p}" ]] && preset_paths+=("${p}")
+		done <<<"${located}"
+		while IFS= read -r problem; do
+			[[ -n "${problem}" ]] && echo "::warning::python preset: ${problem}"
+		done <"${problems_file}"
+		rm -f "${problems_file}"
+		[[ ${rc} -eq 0 ]] && sources_found=true
+	else
+		echo "::warning::Python 3.11+ (tomllib) not found; the python preset cannot read the build configuration, and treats any pyproject.toml or README* change as material"
+		preset_paths+=(":(glob)README*")
+	fi
+
+	if [[ "${sources_found}" == "true" ]]; then
+		includes+=("${preset_paths[@]}")
+	elif [[ ${#includes[@]} -gt 0 ]]; then
+		echo "::warning::python preset: package sources not fully located; relying on 'paths' for them"
+		includes+=("${preset_paths[@]}")
+	else
+		# Missing a release is worse than an extra one, so with nothing to go
+		# on every file counts. Setting 'paths' to the package sources fixes it.
+		echo "::warning::python preset: package sources not located and 'paths' is empty; every changed file counts. Set 'paths' to the package's source directories."
+		includes=()
+	fi
+fi
+
+diff_cmd=(git -c core.quotePath=false diff --no-renames --name-only "${BASE_SHA}" "${HEAD_SHA}")
+if [[ ${#includes[@]} -gt 0 || ${#excludes[@]} -gt 0 ]]; then
+	diff_cmd+=(-- ${includes[@]+"${includes[@]}"} ${excludes[@]+"${excludes[@]}"})
 fi
 
 echo "Running: ${diff_cmd[*]}"
 
-if "${diff_cmd[@]}"; then
+# Captured rather than read through a process substitution, whose exit status
+# is lost: a failed diff must stop the action, not read as "no changes".
+if ! diff_output=$("${diff_cmd[@]}"); then
+	echo "::error::git diff failed; check paths and exclude-paths" >&2
+	exit 1
+fi
+
+changed=()
+while IFS= read -r f; do
+	if [[ "${PRESET}" == "python" && "${f}" == "pyproject.toml" ]]; then
+		if [[ "${HAS_TOMLLIB}" == "true" ]]; then
+			rc=0
+			"${PYTHON}" "${ACTION_DIR}/python_packaging.py" material "${BASE_SHA}" "${HEAD_SHA}" </dev/null || rc=$?
+			if [[ ${rc} -eq 1 ]]; then
+				echo "pyproject.toml changed outside its packaging tables → not material"
+				continue
+			elif [[ ${rc} -ne 0 ]]; then
+				echo "::warning::Could not compare pyproject.toml packaging tables; treating the change as material"
+			fi
+		fi
+	fi
+	changed+=("${f}")
+done < <(if [[ -n "${diff_output}" ]]; then sort -u <<<"${diff_output}"; fi)
+
+if [[ ${#changed[@]} -eq 0 ]]; then
 	echo "No changes detected"
-	echo "has_changes=false" >>"${GITHUB_OUTPUT}"
-	echo "changed_files_count=0" >>"${GITHUB_OUTPUT}"
+	write_outputs
 else
-	count=$("${count_cmd[@]}" | sort -u | wc -l | tr -d '[:space:]')
-	echo "Changes found (${count} file(s))"
-	echo "has_changes=true" >>"${GITHUB_OUTPUT}"
-	echo "changed_files_count=${count}" >>"${GITHUB_OUTPUT}"
+	echo "Changes found (${#changed[@]} file(s)):"
+	printf '  %s\n' "${changed[@]}"
+	write_outputs "${changed[@]}"
+	if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+		{
+			echo "### Changes since ${BASE_REF} (${#changed[@]} file(s))"
+			# shellcheck disable=SC2016 # literal Markdown backticks
+			printf -- '- `%s`\n' "${changed[@]}"
+		} >>"${GITHUB_STEP_SUMMARY}"
+	fi
 fi

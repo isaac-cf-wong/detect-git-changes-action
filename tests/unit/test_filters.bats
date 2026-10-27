@@ -447,3 +447,36 @@ teardown() {
 
 	[ "$(output_value has_changes)" = "true" ]
 }
+
+@test "python preset: files installed as wheel data count" {
+	mkdir -p share/icons
+	echo "<svg/>" >share/icons/demo.svg
+	printf '[tool.hatch.build.targets.wheel.shared-data]\n"share/icons" = "share/demo/icons"\n' >>pyproject.toml
+	commit_all "ship icons"
+	git tag v0.2.0
+	echo "<svg></svg>" >share/icons/demo.svg
+	commit_all "edit icon"
+
+	export INPUT_PRESET="python"
+	run bash "$SCRIPT_PATH"
+
+	[ "$status" -eq 0 ]
+	[ "$(output_value has_changes)" = "true" ]
+	[ "$(changed_files)" = "share/icons/demo.svg" ]
+}
+
+@test "python preset: sdist-only files are not material" {
+	mkdir -p docs/assets
+	echo "data" >docs/assets/schema.dat
+	echo "recursive-include docs/assets *.dat" >MANIFEST.in
+	commit_all "manifest"
+	git tag v0.2.0
+	echo "more" >>docs/assets/schema.dat
+	commit_all "edit sdist-only file"
+
+	export INPUT_PRESET="python"
+	run bash "$SCRIPT_PATH"
+
+	[ "$status" -eq 0 ]
+	[ "$(output_value has_changes)" = "false" ]
+}

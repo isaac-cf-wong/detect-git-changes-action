@@ -283,6 +283,11 @@ def hatch(c, data, sha):
     force_include = {**table(build, "force-include"), **table(wheel, "force-include")}
     for source in force_include:
         c.add(source)
+    # Installed outside the package (the wheel's .data directory) or into its
+    # .dist-info; wheel-target options only. Keys are repository sources.
+    for key in ("shared-data", "shared-scripts", "extra-metadata"):
+        for source in table(wheel, key):
+            c.add(source)
     for hooks in (table(build, "hooks"), table(wheel, "hooks")):
         custom = hooks.get("custom")
         if isinstance(custom, dict):
@@ -341,6 +346,7 @@ class SetuptoolsConfig:
         self.package_dir = {}
         self.py_modules = None
         self.sources = []
+        self.data_files = []  # sources installed through data-files, globs allowed
 
     def package_path(self, name):
         parts = name.split(".")
@@ -368,6 +374,8 @@ def read_setuptools_pyproject(cfg, data):
     for ext in st.get("ext-modules", []) or []:
         if isinstance(ext, dict):
             cfg.sources += str_list(ext.get("sources"))
+    for patterns in table(st, "data-files").values():
+        cfg.data_files += str_list(patterns)
 
 
 def cfg_list(value):
@@ -401,6 +409,9 @@ def read_setup_cfg(cfg, text, c):
         cfg.packages = cfg_list(packages)
     if "py_modules" in options:
         cfg.py_modules = cfg_list(options["py_modules"])
+    if parser.has_section("options.data_files"):
+        for value in parser["options.data_files"].values():
+            cfg.data_files += cfg_list(value)
 
 
 def call_name(node):
@@ -475,6 +486,14 @@ def read_setup_py(cfg, text, c):
         value = literal(keywords["py_modules"], "py_modules")
         if value is not None:
             cfg.py_modules = str_list(list(value))
+    if "data_files" in keywords:
+        value = literal(keywords["data_files"], "data_files")
+        if value is not None:
+            for entry in value if isinstance(value, (list, tuple)) else []:
+                if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                    cfg.data_files += str_list(list(entry[1]))
+                elif isinstance(entry, str):
+                    cfg.data_files.append(entry)
     if "ext_modules" in keywords:
         found = False
         for node in ast.walk(module):
@@ -507,7 +526,7 @@ def setuptools(c, data, sha):
         if text is not None:
             reader(cfg, text, c)
 
-    for source in cfg.sources:
+    for source in cfg.sources + cfg.data_files:
         c.add_path_or_glob(source)
 
     if cfg.packages is None and cfg.py_modules is None:
@@ -585,6 +604,10 @@ def pdm(c, data, sha):
     hook = build.get("custom-hook", "pdm_build.py")
     if c.tree.is_file(clean(hook) or ""):
         c.build_hook(hook, "pdm-backend")
+    # wheel-data: files installed through the wheel's .data directory.
+    for entries in table(build, "wheel-data").values():
+        for entry in entries if isinstance(entries, list) else []:
+            c.add_path_or_glob(entry.get("path") if isinstance(entry, dict) else entry)
     includes = str_list(build.get("includes"))
     for path in includes:
         c.add_path_or_glob(path)
@@ -633,6 +656,8 @@ def maturin(c, data, sha):
     for entry in tool.get("include", []) or []:
         path = entry if isinstance(entry, str) else entry.get("path") if isinstance(entry, dict) else None
         c.add_path_or_glob(path)
+    # The directory installed through the wheel's .data directory.
+    c.add(tool.get("data"))
 
 
 def scikit_build(c, data, sha):

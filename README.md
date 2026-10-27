@@ -77,8 +77,16 @@ does not want README edits to trigger a release can drop them
 
 #### `python`
 
-The preset reads the build configuration to find what goes into the package,
-rather than assuming a layout. The configuration is read, never executed.
+The preset reads the build configuration to find what goes into the installed
+package (the wheel), rather than assuming a layout. The configuration is read,
+never executed.
+
+The source distribution is deliberately not followed: backends put tests, docs
+and other repository files into the sdist (hatchling includes almost everything
+by default), so tracking it would bring back a release for every docs edit.
+Files that only reach the sdist, such as those a `MANIFEST.in` pulls in from
+outside the package, therefore do not count; add them to `paths` if a change to
+them should trigger a release.
 
 | Tracked                                                                  | Why                              |
 | ------------------------------------------------------------------------ | -------------------------------- |
@@ -91,22 +99,22 @@ rather than assuming a layout. The configuration is read, never executed.
 Package sources are located per build backend:
 
 - **hatchling**: `packages`, `only-include`, `include` and `force-include` under
-  `[tool.hatch.build]` or `[tool.hatch.build.targets.wheel]`; otherwise
-  hatchling's default, a package named after the project at the root or under
-  `src/`.
+  `[tool.hatch.build]` or `[tool.hatch.build.targets.wheel]`, plus the wheel's
+  `shared-data`, `shared-scripts` and `extra-metadata`; otherwise hatchling's
+  default, a package named after the project at the root or under `src/`.
 - **setuptools**: `packages` (lists, `find:` and `find_packages()`),
-  `package-dir`, `py-modules` and extension `sources` from `[tool.setuptools]`,
-  `setup.cfg` `[options]` and the `setup()` call in `setup.py`; otherwise
-  setuptools' src-layout / flat-layout auto-discovery. Also used when there is
-  no `[build-system]` table.
+  `package-dir`, `py-modules`, extension `sources` and `data-files` from
+  `[tool.setuptools]`, `setup.cfg` `[options]` and the `setup()` call in
+  `setup.py`; otherwise setuptools' src-layout / flat-layout auto-discovery.
+  Also used when there is no `[build-system]` table.
 - **poetry-core**: `[tool.poetry]` `packages` and wheel `include`s; otherwise a
   package named after the project.
 - **flit-core**: `[tool.flit.module]` `name`, or the project name.
 - **pdm-backend**: `[tool.pdm.build]` `includes`, or `package-dir` (default
-  `src/` when it exists).
+  `src/` when it exists), plus `wheel-data`.
 - **uv_build**: `[tool.uv.build-backend]` `module-root` and `module-name`.
 - **maturin**: `Cargo.toml`, `Cargo.lock`, `build.rs` and `src/` (or the
-  `manifest-path` crate), plus `python-source`.
+  `manifest-path` crate), plus `python-source` and `data`.
 
 When the sources cannot be located, the action warns and says why: a `setup.py`
 that computes its arguments, a build hook (a hatch custom hook, `pdm_build.py`,

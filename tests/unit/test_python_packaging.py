@@ -142,6 +142,22 @@ class HatchTest(LayoutTest):
             {"pkg/__init__.py", "data/schema.json"},
         )
 
+    def test_wheel_shared_data_scripts_and_extra_metadata(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n'
+                '[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n'
+                '[tool.hatch.build.targets.wheel.shared-data]\n"share/icons" = "share/x/icons"\n'
+                '[tool.hatch.build.targets.wheel.shared-scripts]\n"bin/x-run" = "x-run"\n'
+                '[tool.hatch.build.targets.wheel.extra-metadata]\n"legal/NOTES" = "NOTES"\n',
+                "pkg/__init__.py": "",
+                "share/icons/x.svg": "",
+                "bin/x-run": "",
+                "legal/NOTES": "",
+            },
+            {"pkg/__init__.py", "share/icons/x.svg", "bin/x-run", "legal/NOTES"},
+        )
+
     def test_custom_build_hook_is_tracked_but_unresolved(self):
         c = self.resolve(
             {
@@ -296,6 +312,67 @@ class SetuptoolsTest(LayoutTest):
         )
         self.assertTrue(any("cmdclass" in p for p in c.problems))
 
+    def test_pyproject_data_files(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": SETUPTOOLS + '[project]\nname = "x"\n'
+                '[tool.setuptools]\npackages = ["pkg"]\n'
+                '[tool.setuptools.data-files]\n"share/x" = ["assets/*.dat", "assets/README"]\n',
+                "pkg/__init__.py": "",
+                "assets/a.dat": "",
+                "assets/README": "",
+                "assets/unused.txt": "",
+            },
+            {"pkg/__init__.py", "assets/a.dat", "assets/README"},
+        )
+
+    def test_setup_cfg_data_files(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": SETUPTOOLS,
+                "setup.cfg": """\
+                    [metadata]
+                    name = x
+
+                    [options]
+                    packages = pkg
+
+                    [options.data_files]
+                    share/x =
+                        assets/a.dat
+                        assets/b.dat
+                    """,
+                "pkg/__init__.py": "",
+                "assets/a.dat": "",
+                "assets/b.dat": "",
+                "assets/unused.dat": "",
+            },
+            {"pkg/__init__.py", "assets/a.dat", "assets/b.dat"},
+        )
+
+    def test_setup_py_data_files(self):
+        self.assert_matches(
+            {
+                "setup.py": 'from setuptools import setup\n'
+                'setup(name="x", packages=["pkg"], data_files=[("share/x", ["assets/a.dat"]), ("etc", ["conf/x.ini"])])\n',
+                "pkg/__init__.py": "",
+                "assets/a.dat": "",
+                "conf/x.ini": "",
+                "assets/unused.dat": "",
+            },
+            {"pkg/__init__.py", "assets/a.dat", "conf/x.ini"},
+        )
+
+    def test_setup_py_computed_data_files_is_unresolved(self):
+        c = self.resolve(
+            {
+                "setup.py": 'from setuptools import setup\nimport glob\n'
+                'setup(name="x", packages=["pkg"], data_files=[("share", glob.glob("assets/*"))])\n',
+                "pkg/__init__.py": "",
+            }
+        )
+        self.assertTrue(any("data_files" in p for p in c.problems))
+
     def test_setup_py_computed_packages_is_unresolved(self):
         c = self.resolve(
             {
@@ -382,6 +459,20 @@ class OtherBackendsTest(LayoutTest):
             {"mypkg/__init__.py"},
         )
 
+    def test_pdm_wheel_data(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": '[build-system]\nbuild-backend = "pdm.backend"\n[project]\nname = "x"\n'
+                '[tool.pdm.build.wheel-data]\nscripts = ["bin/x-run"]\n'
+                'data = [{ path = "share/**/*.svg", relative-to = "share" }]\n',
+                "src/x/__init__.py": "",
+                "bin/x-run": "",
+                "share/icons/x.svg": "",
+                "share/icons/unused.png": "",
+            },
+            {"src/x/__init__.py", "bin/x-run", "share/icons/x.svg"},
+        )
+
     def test_uv_build_backend(self):
         self.assert_matches(
             {
@@ -403,13 +494,14 @@ class OtherBackendsTest(LayoutTest):
         self.assert_matches(
             {
                 "pyproject.toml": '[build-system]\nbuild-backend = "maturin"\n[project]\nname = "x"\n'
-                '[tool.maturin]\npython-source = "python"\nmodule-name = "x._core"\n',
+                '[tool.maturin]\npython-source = "python"\nmodule-name = "x._core"\ndata = "x.data"\n',
                 "Cargo.toml": "",
                 "Cargo.lock": "",
                 "src/lib.rs": "",
                 "python/x/__init__.py": "",
+                "x.data/scripts/x-tool": "",
             },
-            {"Cargo.toml", "Cargo.lock", "src/lib.rs", "python/x/__init__.py"},
+            {"Cargo.toml", "Cargo.lock", "src/lib.rs", "python/x/__init__.py", "x.data/scripts/x-tool"},
         )
 
     def test_scikit_build_is_unresolved_but_tracks_cmake(self):

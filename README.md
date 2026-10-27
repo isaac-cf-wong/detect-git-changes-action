@@ -106,12 +106,18 @@ directives and `setup.cfg` `file:` / `attr:` directives (e.g. a
 getter module, and poetry's `[tool.poetry]` `readme`.
 
 Python that runs during the build (`setup.py`, a hatch `code` version file, a
-pdm version getter) is read, not run: the files it names, the paths it composes
-with `/`, `os.path.join()` or `Path()`, and the local modules it imports (read
-the same way in turn) are tracked. A file read whose path cannot be worked out
-that way, a hatch custom or unknown metadata hook, and an unknown version source
-count as not located (see below). Version sources that take the version from git
-(`vcs`, `uv-dynamic-versioning`, `versioningit`) read no repository file.
+pdm version getter) is read, not run. Tracked: the files it names; the paths it
+composes with `/`, `os.path.join()`, `Path()`, `.parent` or `dirname()`,
+anchored where they point (the file's own directory for `__file__`); and the
+local modules it imports, statically, through a literal
+`importlib.import_module()` or from a directory it adds to `sys.path`, read the
+same way in turn. A name is followed only when it is bound once in the file, and
+a reader helper such as `read("README.md")` is followed through its call sites.
+Anything else that reads a file or imports a module, in a form the preset cannot
+work out, counts as not located (see below), as do a hatch custom or unknown
+metadata hook and an unknown version source; `open()` in a write-only mode is
+not a read. Version sources that take the version from git (`vcs`,
+`uv-dynamic-versioning`, `versioningit`) read no repository file.
 
 Package sources are located per build backend:
 

@@ -500,20 +500,100 @@ def call_name(node):
     return None
 
 
-# Calls whose first argument, or whose receiver when called without one, is a
-# path the build reads: open()/io.open()/codecs.open(), Path.read_text(),
-# Path.read_bytes(), Path.open(), runpy.run_path().
-FILE_READS = ("open", "read_text", "read_bytes", "run_path")
+class Anchored:
+    """A path an expression builds, and what it is relative to.
+
+    ``anchor`` is None for a bare relative path (resolved against both the
+    repository root, the build's working directory, and the scanned file's
+    directory), ``"root"`` for the working directory, ``"self"`` for the scanned
+    file itself, or an int: the scanned file's directory ``n`` levels up.
+    """
+
+    def __init__(self, anchor, rel=""):
+        self.anchor = anchor
+        self.rel = rel
+
+    def parent(self):
+        if self.anchor == "self":
+            return Anchored(0)
+        if self.rel:
+            return Anchored(self.anchor, posixpath.dirname(self.rel))
+        if isinstance(self.anchor, int):
+            return Anchored(self.anchor + 1)
+        return None  # the parent of the working directory: outside the repository
+
+    def join(self, other):
+        if self.anchor == "self" or other.anchor is not None:
+            return None  # joining onto a file, or an absolute/anchored right-hand side
+        return Anchored(self.anchor, posixpath.join(self.rel, other.rel) if self.rel else other.rel)
+
+    def candidates(self, here):
+        if self.anchor == "self":
+            return []
+        if self.anchor is None:
+            bases = list(dict.fromkeys(("", here)))
+        elif self.anchor == "root":
+            bases = [""]
+        else:
+            parts = here.split("/") if here else []
+            if self.anchor > len(parts):
+                return None
+            bases = ["/".join(parts[: len(parts) - self.anchor])]
+        out = []
+        for base in bases:
+            joined_path = posixpath.join(base, self.rel) if base else self.rel
+            path = "" if joined_path in ("", ".") else clean(joined_path)  # "" is the repository root
+            if path is None:
+                return None
+            out.append(path)
+        return out
+
+
+# Calls that read a file, and where the path is: ("arg", index, keywords) for
+# an argument, ("receiver",) for the object the method is called on.
+OPEN_MODULES = ("io", "codecs", "os")
+READ_CALLS = {
+    "read_text": ("receiver",),
+    "read_bytes": ("receiver",),
+    "run_path": ("arg", 0, ("path_name",)),
+    "spec_from_file_location": ("arg", 1, ("location",)),
+    "SourceFileLoader": ("arg", 1, ("path",)),
+    "load_source": ("arg", 1, ("pathname",)),
+}
+IMPORT_CALLS = ("import_module", "__import__", "run_module")
+SYS_PATH_CALLS = ("insert", "append", "addsitedir")
+
+
+def argument(node, index, keywords):
+    if index is not None and len(node.args) > index and not isinstance(node.args[index], ast.Starred):
+        return node.args[index]
+    return next((k.value for k in node.keywords if k.arg in keywords), None)
+
+
+def is_write_only(mode):
+    """True for a literal open() mode that only writes ("w", "a", "x"; not "+")."""
+    return (
+        isinstance(mode, ast.Constant)
+        and isinstance(mode.value, str)
+        and "r" not in mode.value
+        and "+" not in mode.value
+        and any(ch in mode.value for ch in "wax")
+    )
 
 
 def scan_python(c, path, module=None, seen=None):
-    """Track what a Python file run at build time reads, as far as reading it shows.
+    """Track what a Python file run at build time reads, or report that it cannot be told.
 
-    Followed: string constants naming a tracked file; paths composed with ``/``,
-    ``os.path.join()`` or ``Path()``, resolved against the repository root (the
-    build's working directory) and the file's own directory; and local modules
-    it imports, scanned in turn. A file read whose path cannot be worked out is
-    reported as unresolved.
+    The file is parsed, never run. Tracked: string constants naming a tracked
+    file; paths composed with ``/``, ``os.path.join()``, ``Path()``, ``.parent``
+    and ``dirname()``, anchored where they are anchored (the file's own
+    directory for ``__file__``, the working directory otherwise); local modules
+    imported statically, through a literal ``importlib.import_module()``, or
+    from a directory added to ``sys.path``, each scanned in turn. A name is
+    followed only when it is bound exactly once in the file; a reader helper is
+    followed through its call sites. Anything else that reads a file or imports
+    a module -- a path or name that cannot be worked out, a form not recognised
+    -- is reported as unresolved, so the preset fails open rather than miss it.
     """
     seen = set() if seen is None else seen
     if path in seen:
@@ -530,46 +610,179 @@ def scan_python(c, path, module=None, seen=None):
             return
     here = posixpath.dirname(path)
 
-    assigned = {}
-    for node in ast.walk(module):
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            assigned.setdefault(node.targets[0].id, node.value)
+    def unresolved(node, action, noun):
+        c.unresolved(
+            f"{path} {action} (line {node.lineno}) whose {noun} cannot be worked out without running it;"
+            " add the files involved to 'paths'"
+        )
 
-    def joined(node, depth=0):
-        """The relative path an expression builds; "" for a base such as ``here``."""
-        if depth > 20:
+    # Bindings: a name is trusted only when it is bound exactly once anywhere.
+    bindings = {}
+    values = {}
+    for node in ast.walk(module):
+        names = []
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names = [node.id]
+        elif isinstance(node, ast.arg):
+            names = [node.arg]
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [(a.asname or a.name).split(".")[0] for a in node.names]
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names = [node.name]
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names = list(node.names) * 2
+        for name in names:
+            bindings[name] = bindings.get(name, 0) + 1
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            values[node.targets[0].id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            values[node.target.id] = node.value
+
+    def joined(node, env=None, depth=0):
+        """The Anchored path an expression builds, or None when it cannot be told."""
+        if depth > 30 or node is None:
             return None
-        if isinstance(node, ast.Name) and node.id in assigned:
-            return joined(assigned[node.id], depth + 1)
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
+            if node.value.startswith("/"):
+                return None
+            return Anchored(None, node.value)
+        if isinstance(node, ast.Name):
+            if node.id == "__file__":
+                return Anchored("self")
+            if env is not None and node.id in env:
+                bound = env[node.id]
+                return joined(bound[0], None, depth + 1) if len(bound) == 1 else None
+            if bindings.get(node.id) == 1 and node.id in values:
+                return joined(values[node.id], None, depth + 1)
+            return None
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-            left, right = joined(node.left, depth + 1), joined(node.right, depth + 1)
-            if left is None or not right:
+            left, right = joined(node.left, env, depth + 1), joined(node.right, env, depth + 1)
+            return left.join(right) if left and right else None
+        if isinstance(node, ast.Attribute) and node.attr == "parent":
+            inner = joined(node.value, env, depth + 1)
+            return inner.parent() if inner else None
+        if isinstance(node, ast.Call):
+            name = call_name(node)
+            if node.keywords and name not in ("Path", "PurePath", "PosixPath"):
                 return None
-            return posixpath.join(left, right) if left else right
-        if isinstance(node, ast.Call) and call_name(node) in ("join", "Path", "PurePath"):
-            parts = [joined(arg, depth + 1) for arg in node.args]
-            if any(part is None for part in parts[1:]) or any(part == "" for part in parts[1:]):
-                return None
-            parts = [part for part in parts if part]
-            return posixpath.join(*parts) if parts else ""
-        if isinstance(node, ast.Attribute) and node.attr in ("parent", "parents"):
-            return ""
-        if isinstance(node, ast.Call) and call_name(node) in ("dirname", "abspath", "realpath", "resolve", "absolute"):
-            return ""
-        if isinstance(node, ast.Name) and node.id == "__file__":
-            return ""
+            if name in ("join", "Path", "PurePath", "PosixPath"):
+                parts = []
+                for arg in node.args:
+                    if isinstance(arg, ast.Starred):
+                        if not (isinstance(arg.value, ast.Name) and env is not None and arg.value.id in env):
+                            return None
+                        parts += [joined(n, None, depth + 1) for n in env[arg.value.id]]
+                    else:
+                        parts.append(joined(arg, env, depth + 1))
+                if any(part is None for part in parts):
+                    return None
+                if not parts:
+                    return Anchored("root") if name != "join" else None
+                result = parts[0]
+                for part in parts[1:]:
+                    result = result.join(part)
+                    if result is None:
+                        return None
+                return result
+            if name in ("str", "fspath") and len(node.args) == 1:
+                return joined(node.args[0], env, depth + 1)
+            if name in ("dirname", "abspath", "realpath", "normpath"):
+                inner = joined(node.args[0], env, depth + 1) if len(node.args) == 1 else None
+                if inner is None:
+                    return None
+                return inner.parent() if name == "dirname" else inner
+            if name in ("resolve", "absolute") and isinstance(node.func, ast.Attribute) and not node.args:
+                return joined(node.func.value, env, depth + 1)
+            if name in ("getcwd", "cwd") and not node.args:
+                return Anchored("root")
         return None
 
-    def track(candidate):
-        """Add the tracked file or directory a relative path names; True if there is one."""
-        for base in dict.fromkeys(("", here)):
-            target = clean(posixpath.join(base, candidate) if base else candidate)
+    def track(anchored):
+        """Add the tracked files or directories a path names; True if it names any."""
+        if anchored.anchor == "self":
+            return True
+        found = False
+        for target in anchored.candidates(here) or []:
             if target and (c.tree.is_file(target) or c.tree.is_dir(target)):
                 c.add(target)
+                found = True
                 if target.endswith(".py") and c.tree.is_file(target):
                     scan_python(c, target, seen=seen)
+        return found
+
+    # Each node's enclosing top-level function, to follow reader helpers.
+    enclosing = {}
+    functions = {}
+    for top in module.body:
+        if isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions[top.name] = top
+            for node in ast.walk(top):
+                enclosing[node] = top
+
+    def environments(node):
+        """Parameter bindings at each call site of the function enclosing ``node``.
+
+        [None] outside a function; None when a call site cannot be bound.
+        """
+        func = enclosing.get(node)
+        if func is None:
+            return [None]
+        if bindings.get(func.name) != 1:
+            return None
+        params = [a.arg for a in func.args.posonlyargs + func.args.args]
+        defaults = dict(zip(params[len(params) - len(func.args.defaults) :], func.args.defaults))
+        envs = []
+        for call in ast.walk(module):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == func.name):
+                continue
+            if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+                return None
+            env = {name: [value] for name, value in defaults.items()}
+            for name, value in zip(params, call.args):
+                env[name] = [value]
+            if func.args.vararg:
+                env[func.args.vararg.arg] = list(call.args[len(params) :])
+            elif len(call.args) > len(params):
+                return None
+            for k in call.keywords:
+                env[k.arg] = [k.value]
+            envs.append(env)
+        return envs
+
+    # Directories added to sys.path, searched by later imports.
+    import_bases = ["", "src"]
+    for node in ast.walk(module):
+        if not (isinstance(node, ast.Call) and call_name(node) in SYS_PATH_CALLS and isinstance(node.func, ast.Attribute)):
+            continue
+        receiver = node.func.value
+        is_sys_path = isinstance(receiver, ast.Attribute) and receiver.attr == "path" and getattr(receiver.value, "id", None) == "sys"
+        if not (is_sys_path or getattr(receiver, "id", None) == "site"):
+            continue
+        anchored = joined(node.args[-1]) if node.args else None
+        targets = anchored.candidates(here) if anchored else None
+        # "" is the repository root, which is always there.
+        dirs = [t for t in targets or [] if t == "" or c.tree.is_dir(t)]
+        if dirs:
+            import_bases += [d for d in dirs if d not in import_bases]
+        else:
+            unresolved(node, "adds a directory to sys.path", "location")
+
+    def import_module(name, bases):
+        """Track and scan a local module and the packages above it; True if it is local."""
+        parts = name.split(".")
+        for base in bases:
+            found = False
+            for i in range(1, len(parts) + 1):
+                stem_path = "/".join(parts[:i])
+                stem = clean(posixpath.join(base, stem_path) if base else stem_path)
+                # Importing a.b.c runs a/__init__.py and a/b/__init__.py first.
+                for candidate in (f"{stem}/__init__.py", f"{stem}.py") if stem else ():
+                    if c.tree.is_file(candidate):
+                        c.add(candidate)
+                        scan_python(c, candidate, seen=seen)
+                        found = True
+                        break
+            if found:
                 return True
         return False
 
@@ -580,39 +793,61 @@ def scan_python(c, path, module=None, seen=None):
                 c.add(target)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             if isinstance(node, ast.ImportFrom) and node.level:
-                bases = [posixpath.join(here, *[".."] * (node.level - 1))]
+                bases = [posixpath.normpath(posixpath.join(here or ".", *[".."] * (node.level - 1)))]
+                bases = ["" if b == "." else b for b in bases]
                 names = [node.module or ""] + [f"{node.module}.{a.name}" if node.module else a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                bases, names = import_bases, [node.module] + [f"{node.module}.{a.name}" for a in node.names]
             else:
-                bases = ["", "src"]
-                if isinstance(node, ast.ImportFrom):
-                    names = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
-                else:
-                    names = [a.name for a in node.names]
+                bases, names = import_bases, [a.name for a in node.names]
             for name in names:
-                if not name:
-                    continue
-                for base in bases:
-                    stem = clean(posixpath.join(base, name.replace(".", "/")) if base else name.replace(".", "/"))
-                    if stem and c.tree.is_file(f"{stem}.py"):
-                        c.add(f"{stem}.py")
-                        scan_python(c, f"{stem}.py", seen=seen)
-                    elif stem and c.tree.is_file(f"{stem}/__init__.py"):
-                        c.add(f"{stem}/__init__.py")
-                        scan_python(c, f"{stem}/__init__.py", seen=seen)
-        elif isinstance(node, ast.Call) and call_name(node) in FILE_READS:
-            func = node.func
-            if node.args:
-                target = node.args[0]
-            elif isinstance(func, ast.Attribute):
-                target = func.value
+                if name:
+                    import_module(name, bases)
+        if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)) or isinstance(node, (ast.Call, ast.Attribute)):
+            # A composed path anywhere -- whatever it is passed to -- is tracked when it exists.
+            anchored = joined(node)
+            if anchored is not None and anchored.rel:
+                track(anchored)
+        if not isinstance(node, ast.Call):
+            continue
+        name = call_name(node)
+
+        if name in IMPORT_CALLS:
+            target = argument(node, 0, ("name", "mod_name"))
+            literal = target.value if isinstance(target, ast.Constant) and isinstance(target.value, str) else None
+            if literal is None:
+                unresolved(node, "imports a module", "name")
+            elif literal.startswith("."):
+                import_module(literal.lstrip("."), [here])
             else:
+                import_module(literal, import_bases)
+            continue
+
+        if name == "open":
+            func = node.func
+            if isinstance(func, ast.Name) or (isinstance(func, ast.Attribute) and getattr(func.value, "id", None) in OPEN_MODULES):
+                target = argument(node, 0, ("file", "filename", "path"))
+                mode = argument(node, 1, ("mode",))
+            else:
+                target = func.value if isinstance(func, ast.Attribute) else None
+                mode = argument(node, 0, ("mode",))
+            if is_write_only(mode):
                 continue
-            candidate = joined(target)
-            if not candidate or not track(candidate):
-                c.unresolved(
-                    f"{path} reads a file whose path cannot be worked out without running it"
-                    f" (line {node.lineno}); add that file to 'paths'"
-                )
+        elif name in READ_CALLS:
+            spec = READ_CALLS[name]
+            if spec[0] == "receiver":
+                target = node.func.value if isinstance(node.func, ast.Attribute) else None
+            else:
+                target = argument(node, spec[1], spec[2])
+        else:
+            continue
+
+        envs = environments(node)
+        resolved = envs is not None and all(
+            (anchored := joined(target, env)) is not None and track(anchored) for env in envs
+        )
+        if not resolved:
+            unresolved(node, "reads a file", "path")
 
 
 def read_setup_py(cfg, text, c):

@@ -599,6 +599,193 @@ class SetuptoolsTest(LayoutTest):
             {"pkg/__init__.py", "_build_meta.py", "helpers/ver.py"},
         )
 
+    def test_file_relative_path_is_not_masked_by_a_root_file(self):
+        self.assert_matches(
+            {
+                "setup.py": 'from setuptools import setup\nfrom scripts.version import get_version\n'
+                'setup(name="x", version=get_version(), packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "scripts/__init__.py": "",
+                "scripts/version.py": "from pathlib import Path\n\n"
+                "def get_version():\n    return (Path(__file__).parent / 'VERSION').read_text()\n",
+                "scripts/VERSION": "",
+                "VERSION": "",
+            },
+            # The root VERSION is tracked too, since the helper names "VERSION": over-tracking,
+            # not masking. What matters is that scripts/VERSION, the file it reads, is there.
+            {"pkg/__init__.py", "scripts/__init__.py", "scripts/version.py", "scripts/VERSION", "VERSION"},
+        )
+
+    def test_parent_chain_from_a_nested_file(self):
+        self.assert_matches(
+            {
+                "setup.py": "from setuptools import setup\nfrom tools.build.meta import VERSION\n"
+                'setup(name="x", version=VERSION, packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "tools/build/meta.py": "from pathlib import Path\n"
+                "VERSION = (Path(__file__).parent.parent / 'VERSION').read_text()\n",
+                "tools/VERSION": "",
+                "tools/build/VERSION": "",
+            },
+            {"pkg/__init__.py", "tools/build/meta.py", "tools/VERSION"},
+        )
+
+    def test_name_bound_in_another_scope_is_not_trusted(self):
+        c = self.resolve(
+            {
+                "setup.py": """\
+                    from pathlib import Path
+                    from setuptools import setup
+
+                    VERSION_PATH = "decoy.txt"
+
+                    def get_version():
+                        VERSION_PATH = Path("metadata") / "VERSION"
+                        return VERSION_PATH.read_text()
+
+                    setup(name="x", version=get_version(), packages=["pkg"])
+                    """,
+                "pkg/__init__.py": "",
+                "decoy.txt": "",
+                "metadata/VERSION": "",
+            }
+        )
+        # VERSION_PATH is bound twice, so the read is not guessed: it is reported, and the
+        # composed path is still tracked.
+        self.assertTrue(any("reads a file" in p for p in c.problems))
+        self.assertIn("metadata/VERSION", self.matched(c))
+
+    def test_dynamic_import_with_a_literal_name(self):
+        self.assert_matches(
+            {
+                "setup.py": "import importlib\nfrom setuptools import setup\n"
+                'setup(name="x", version=importlib.import_module("version_data").VERSION, packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "version_data.py": "",
+            },
+            {"pkg/__init__.py", "version_data.py"},
+        )
+
+    def test_dynamic_import_with_a_computed_name_is_unresolved(self):
+        c = self.resolve(
+            {
+                "setup.py": "import importlib, os\nfrom setuptools import setup\n"
+                'mod = importlib.import_module(os.environ["META"])\nsetup(name="x", packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+            }
+        )
+        self.assertTrue(any("imports a module" in p for p in c.problems))
+
+    def test_sys_path_insertion_is_followed_by_imports(self):
+        self.assert_matches(
+            {
+                "setup.py": "import os, sys\nfrom setuptools import setup\n"
+                'sys.path.insert(0, os.path.join(os.path.dirname(__file__), "build_tools"))\n'
+                "from versioning import VERSION\n"
+                'setup(name="x", version=VERSION, packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "build_tools/versioning.py": "",
+            },
+            {"pkg/__init__.py", "build_tools/versioning.py"},
+        )
+
+    def test_sys_path_insertion_of_a_str_wrapped_path(self):
+        self.assert_matches(
+            {
+                "setup.py": "import sys\nfrom pathlib import Path\nfrom setuptools import setup\n"
+                'package_dir = Path(__file__).parent / "mlpkg"\nsys.path.append(str(package_dir))\n'
+                "from _version import __version__\n"
+                'setup(name="x", version=__version__, packages=["mlpkg"])\n',
+                "mlpkg/__init__.py": "",
+                "mlpkg/_version.py": "",
+            },
+            {"mlpkg/__init__.py", "mlpkg/_version.py"},
+        )
+
+    def test_sys_path_insertion_of_the_project_root(self):
+        self.assert_matches(
+            {
+                "setup.py": "import os, sys\nfrom setuptools import setup\n"
+                "sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\n"
+                "from version_data import VERSION\n"
+                'setup(name="x", version=VERSION, packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "version_data.py": "",
+            },
+            {"pkg/__init__.py", "version_data.py"},
+        )
+
+    def test_open_with_keyword_path(self):
+        self.assert_matches(
+            {
+                "setup.py": "from pathlib import Path\nfrom setuptools import setup\n"
+                'version = open(file=Path("metadata") / "VERSION").read()\n'
+                'setup(name="x", version=version, packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "metadata/VERSION": "",
+            },
+            {"pkg/__init__.py", "metadata/VERSION"},
+        )
+
+    def test_write_only_open_is_not_a_read(self):
+        self.assert_matches(
+            {
+                "setup.py": "from setuptools import setup\n"
+                'with open("generated.py", "w") as f:\n    f.write("X = 1")\n'
+                'with open(file="log.txt", mode="a") as f:\n    f.write("built")\n'
+                'setup(name="x", packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+            },
+            {"pkg/__init__.py"},
+        )
+
+    def test_reader_helper_resolved_through_its_call_sites(self):
+        self.assert_matches(
+            {
+                "setup.py": """\
+                    import os
+                    from setuptools import setup
+
+                    here = os.path.abspath(os.path.dirname(__file__))
+
+                    def read(*parts):
+                        with open(os.path.join(here, *parts), encoding="utf-8") as f:
+                            return f.read()
+
+                    setup(
+                        name="x",
+                        packages=["pkg"],
+                        long_description=read("docs", "LONG.md"),
+                        version=read("VERSION").strip(),
+                    )
+                    """,
+                "pkg/__init__.py": "",
+                "docs/LONG.md": "",
+                "VERSION": "",
+                "docs/other.md": "",
+            },
+            {"pkg/__init__.py", "docs/LONG.md", "VERSION"},
+        )
+
+    def test_reader_helper_with_a_computed_call_site_is_unresolved(self):
+        c = self.resolve(
+            {
+                "setup.py": """\
+                    import os, sys
+                    from setuptools import setup
+
+                    def read(name):
+                        with open(name) as f:
+                            return f.read()
+
+                    notes = read(sys.argv[-1])
+                    setup(name="x", packages=["pkg"])
+                    """,
+                "pkg/__init__.py": "",
+            }
+        )
+        self.assertTrue(any("reads a file" in p for p in c.problems))
+
     def test_setup_py_computed_packages_is_unresolved(self):
         c = self.resolve(
             {

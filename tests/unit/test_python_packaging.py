@@ -249,6 +249,20 @@ class HatchTest(LayoutTest):
         )
         self.assertTrue(any("version source" in p for p in c.problems))
 
+    def test_metadata_hook_text_is_not_taken_for_a_pattern(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\ndynamic = ["readme"]\n'
+                '[tool.hatch.metadata.hooks.fancy-pypi-readme]\ncontent-type = "text/markdown"\n'
+                '[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]\npath = "README.md"\n'
+                '[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]\ntext = "\\n* see [docs]\\n*\\n"\n'
+                '[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]\npattern = ".*"\nreplacement = "x"\n',
+                "x/__init__.py": "",
+                "README.md": "",
+            },
+            {"x/__init__.py", "README.md"},
+        )
+
     def test_requirements_txt_metadata_hook(self):
         self.assert_matches(
             {
@@ -934,6 +948,31 @@ class SetuptoolsTest(LayoutTest):
             links={"VERSION": "metadata/VERSION"},
         )
 
+    def test_reader_helper_in_an_imported_module_is_unresolved(self):
+        c = self.resolve(
+            {
+                "setup.py": "import os\nfrom setuptools import setup\nfrom helpers import read\n"
+                'setup(name="x", version=read(os.environ["VERSION_FILE"]), packages=["pkg"])\n',
+                "helpers.py": 'def read(path):\n    return open(path).read()\n\nNOTES = read("NOTES")\n',
+                "NOTES": "",
+                "pkg/__init__.py": "",
+            }
+        )
+        self.assertTrue(any("helpers.py" in p for p in c.problems), c.problems)
+
+    def test_reader_helper_in_a_module_run_by_path_is_unresolved(self):
+        c = self.resolve(
+            {
+                "setup.py": "import os, runpy\nfrom setuptools import setup\n"
+                'helpers = runpy.run_path("helpers.py")\n'
+                'setup(name="x", version=helpers["read"](os.environ["VERSION_FILE"]), packages=["pkg"])\n',
+                "helpers.py": 'def read(path):\n    return open(path).read()\n\nNOTES = read("NOTES")\n',
+                "NOTES": "",
+                "pkg/__init__.py": "",
+            }
+        )
+        self.assertTrue(any("helpers.py" in p for p in c.problems), c.problems)
+
     def test_os_open_with_write_only_flags_is_not_a_read(self):
         self.assert_matches(
             {
@@ -1066,6 +1105,27 @@ class SymlinkTest(LayoutTest):
             links={"pkg/a": "b", "pkg/b": "a"},
         )
         self.assertTrue(any("symlink pkg/a loops" in p or "symlink pkg/b loops" in p for p in c.problems), c.problems)
+
+
+    def test_symlink_recorded_on_the_way_to_a_narrower_path_is_still_followed(self):
+        sha = self.commit({"lib/pkg/__init__.py": "", "lib/other.py": ""}, links={"src": "lib"})
+        c = python_packaging.Collector(python_packaging.Tree(sha), sha)
+        c.add("src/pkg")
+        c.add("src")
+        self.assertEqual(c.problems, [])
+        self.assertEqual(self.matched(c), {"src", "lib/pkg/__init__.py", "lib/other.py"})
+
+    def test_symlink_target_with_a_newline_keeps_later_targets_paired(self):
+        c = self.resolve(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+                "pkg/__init__.py": "",
+                "shared/data.json": "",
+            },
+            links={"pkg/a_odd": "x\ny", "pkg/b_data.json": "../shared/data.json"},
+        )
+        self.assertIn("shared/data.json", self.matched(c))
+        self.assertTrue(all("\n" not in spec for spec in c.paths), c.paths)
 
 
 class OtherBackendsTest(LayoutTest):

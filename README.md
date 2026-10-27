@@ -115,7 +115,9 @@ from a directory added by a direct `sys.path.insert()` / `append()` or
 `site.addsitedir()` (under whatever name `import sys` or `import site` binds),
 read the same way in turn. A name is followed only when it is bound once in the
 file, and a reader helper such as `read("README.md")` is followed through its
-direct call sites. Anything else counts as not located (see below): a read or
+direct call sites in the file the backend runs. A helper in a module that file
+imports or runs can be called with anything, so its parameter-dependent reads
+count as not located. Anything else counts as not located (see below): a read or
 import whose path or name cannot be worked out, a reader function referenced
 other than by a direct call (an alias, a callback, a caller in another file),
 any other use of `sys.path` or of the `sys` and `site` modules themselves, a

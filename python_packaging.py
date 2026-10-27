@@ -119,15 +119,18 @@ class Tree:
         if link_blobs:
             batch = subprocess.run(
                 ["git", "cat-file", "--batch"],
-                input="\n".join(link_blobs.values()) + "\n",
+                input=("\n".join(link_blobs.values()) + "\n").encode(),
                 capture_output=True,
                 check=True,
-                text=True,
-            ).stdout.splitlines()
-            targets = iter(batch)
+            ).stdout
+            # Each record is "<sha> blob <size>\n<content>\n"; read by size, as a
+            # target may itself contain a newline.
+            pos = 0
             for path in link_blobs:
-                next(targets)  # "<sha> blob <size>"
-                target = next(targets)
+                header_end = batch.index(b"\n", pos)
+                size = int(batch[pos:header_end].split()[2])
+                target = batch[header_end + 1 : header_end + 1 + size].decode("utf-8", "surrogateescape")
+                pos = header_end + 1 + size + 1
                 resolved = None if target.startswith("/") else clean(posixpath.join(posixpath.dirname(path), target))
                 self.links[path] = resolved or None
         self.dirs = set()
@@ -256,9 +259,13 @@ class Collector:
         self.sha = sha
         self.paths = []
         self.problems = []
+        self._entered = set()
 
     def _append(self, spec):
-        if spec not in self.paths:
+        # The pathspecs are printed one per line.
+        if "\n" in spec or "\r" in spec:
+            self.unresolved(f"path {spec!r} contains a line break")
+        elif spec not in self.paths:
             self.paths.append(spec)
 
     def add(self, path, _hops=0):
@@ -292,11 +299,12 @@ class Collector:
 
     def _enter(self, spec, path, hops):
         """Add ``spec``; False when it is already there or symlinks loop."""
-        if spec in self.paths:
+        if spec in self._entered:
             return False
         if hops > MAX_SYMLINK_HOPS:
             self.unresolved(f"symlinks leading to {path} loop or nest more than {MAX_SYMLINK_HOPS} deep")
             return False
+        self._entered.add(spec)
         self._append(spec)
         return True
 
@@ -437,10 +445,10 @@ def hatch(c, data, sha):
             continue
         if name not in KNOWN_HATCH_METADATA_HOOKS:
             c.unresolved(f"hatchling: metadata hook {name!r} is not one the python preset knows, and may read files")
+        # The known hooks take plain file paths; their other strings (readme
+        # text, regex substitutions) are not paths, so only a tracked file counts.
         for value in strings(hook):
-            if is_pattern(value):
-                c.add_glob(value)
-            elif c.tree.is_file(clean(value) or ""):
+            if c.tree.is_file(clean(value) or ""):
                 c.add(value)
     if include or packages or only_include:
         return
@@ -695,7 +703,7 @@ def is_write_only_flags(flags):
     return "O_WRONLY" in names and "O_RDWR" not in names
 
 
-def scan_python(c, path, module=None, seen=None):
+def scan_python(c, path, module=None, seen=None, imported=False):
     """Track what a Python file run at build time reads, or report that it cannot be told.
 
     The file is parsed, never run. Tracked: string constants naming a tracked
@@ -706,7 +714,8 @@ def scan_python(c, path, module=None, seen=None):
     from a directory added to ``sys.path`` (by whatever name ``sys`` is
     imported under), each scanned in turn. A name is
     followed only when it is bound exactly once in the file; a reader helper is
-    followed through its call sites. Anything else that reads a file or imports
+    followed through its call sites, except in a module reached by import
+    (``imported``), whose functions any importer may call with anything. Anything else that reads a file or imports
     a module -- a path or name that cannot be worked out, a form not recognised
     -- is reported as unresolved, so the preset fails open rather than miss it.
     """
@@ -822,7 +831,7 @@ def scan_python(c, path, module=None, seen=None):
                 c.add(target)
                 found = True
                 if target.endswith(".py") and c.tree.is_file(target):
-                    scan_python(c, target, seen=seen)
+                    scan_python(c, target, seen=seen, imported=True)
         return found
 
     # Each node's enclosing top-level function, to follow reader helpers.
@@ -855,6 +864,8 @@ def scan_python(c, path, module=None, seen=None):
         used = {n.id for n in ast.walk(target) if isinstance(n, ast.Name)} if target is not None else set()
         if func is None or not used & set(params):
             return [None]
+        if imported:
+            return None
         if bindings.get(func.name) != 1:
             return None
         loads = [n for n in ast.walk(module) if isinstance(n, ast.Name) and n.id == func.name and isinstance(n.ctx, ast.Load)]
@@ -952,7 +963,7 @@ def scan_python(c, path, module=None, seen=None):
                 for candidate in (f"{stem}/__init__.py", f"{stem}.py") if stem else ():
                     if c.tree.is_file(candidate):
                         c.add(candidate)
-                        scan_python(c, candidate, seen=seen)
+                        scan_python(c, candidate, seen=seen, imported=True)
                         found = True
                         break
             if found:

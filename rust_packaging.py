@@ -137,7 +137,8 @@ MACRO_OR_ATTRIBUTE_ARG = re.compile(r"(?:!\s*[(\[{]|#\[[^\]]*=)\s*$")
 RERUN_ENV = re.compile(r"cargo::?rerun-if-env-changed=")
 
 
-RAW_STRING_START = re.compile(r'b?r(#*)"')
+# Raw strings, raw byte strings and raw C strings: r"…", br#"…"#, cr"…".
+RAW_STRING_START = re.compile(r'[bc]?r(#*)"')
 
 
 def strip_comments(text):
@@ -150,7 +151,7 @@ def strip_comments(text):
     """
     out, i, n = [], 0, len(text)
     while i < n:
-        raw = RAW_STRING_START.match(text, i) if text[i] in "br" and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")) else None
+        raw = RAW_STRING_START.match(text, i) if text[i] in "bcr" and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")) else None
         char = CHAR.match(text, i) if text[i] == "'" else None
         if raw:
             end = text.find('"' + raw.group(1), raw.end())

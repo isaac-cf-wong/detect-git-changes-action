@@ -227,12 +227,16 @@ class SourceScanTest(CrateTest):
                 "src/lib.rs": "const Q: char = '\"'; const URL: &str = \"https://example.com\"; "
                 'const A: &str = include_str!("../a.txt");\n'
                 'const J: &str = r#"{"url": "http://x"}"#; const B: &str = include_str!("../b.txt");\n'
+                'const K: &CStr = cr#"{"url": "http://x"}"#; const D: &str = include_str!("../d.txt");\n'
+                'const L: &[u8] = br"http://x"; const E: &str = include_str!("../e.txt");\n'
                 "fn f<'a>(x: &'a str) -> &'a str { x } const C: &str = include_str!(\"../c.txt\");\n",
                 "a.txt": "",
                 "b.txt": "",
                 "c.txt": "",
+                "d.txt": "",
+                "e.txt": "",
             },
-            {"Cargo.toml", "src/lib.rs", "a.txt", "b.txt", "c.txt"},
+            {"Cargo.toml", "src/lib.rs", "a.txt", "b.txt", "c.txt", "d.txt", "e.txt"},
         )
 
     def test_library_outside_src_tracks_its_modules(self):

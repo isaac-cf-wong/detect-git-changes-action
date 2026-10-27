@@ -22,17 +22,18 @@ jobs:
 
             # Release only when something users get changed: what a caller runs
             # (the action definition, the scripts at the repository root, the
-            # license) or the documentation that explains how to use it, so a
-            # docs update reaches users through a release too. Tests, CI
-            # workflows and tooling config change neither. Root-level globs keep
-            # a newly added script or Markdown file covered without editing
-            # this list.
+            # license), the documentation that explains how to use it, or the
+            # citation metadata, so a docs or citation update reaches users
+            # through a release too. Tests, CI workflows and tooling config
+            # change none of them. Root-level globs keep a newly added script or
+            # Markdown file (any case of `.md`) covered without editing this
+            # list.
             - name: Check for changes to the action or its documentation
               id: check_changes
               uses: ./
               with:
                   use-latest-tag: 'true'
-                  paths: 'action.yml,:(glob)*.sh,:(glob)*.py,LICENSE,:(glob)*.md,docs/'
+                  paths: 'action.yml,:(glob)*.sh,:(glob)*.py,LICENSE,CITATION.cff,:(glob)*.[mM][dD],docs/'
 
     test_action:
         needs: check_changes

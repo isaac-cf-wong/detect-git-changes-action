@@ -387,6 +387,16 @@ class SetuptoolsTest(LayoutTest):
                     {"src/pkg/__init__.py"},
                 )
 
+    def test_setup_py_find_packages_with_a_tuple_where(self):
+        self.assert_matches(
+            {
+                "setup.py": "from setuptools import find_packages, setup\n"
+                'setup(name="x", package_dir={"": "src"}, packages=find_packages(where=("src",)))\n',
+                "src/pkg/__init__.py": "",
+            },
+            {"src/pkg/__init__.py"},
+        )
+
     def test_find_that_matches_nothing_is_unresolved(self):
         for files in (
             {"setup.py": 'from setuptools import find_packages, setup\nsetup(name="x", packages=find_packages(where="nosuch"))\n'},
@@ -1368,6 +1378,28 @@ class OtherBackendsTest(LayoutTest):
                 "crates/other/src/lib.rs": "",
             },
             {"Cargo.toml", "Cargo.lock", "crates/x/Cargo.toml", "crates/x/src/lib.rs"},
+        )
+
+    def test_maturin_tracks_cargo_path_dependencies(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": '[build-system]\nbuild-backend = "maturin"\n[project]\nname = "x"\n'
+                '[tool.maturin]\nmanifest-path = "crates/x/Cargo.toml"\n',
+                "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\n'
+                '[workspace.dependencies]\nz = { path = "crates/z" }\n',
+                "crates/x/Cargo.toml": '[dependencies]\ny = { path = "../y" }\nz = { workspace = true }\n'
+                "[dev-dependencies]\nt = { path = \"../t\" }\n",
+                "crates/x/src/lib.rs": "",
+                "crates/y/Cargo.toml": '[build-dependencies]\nw = { path = "../w" }\n',
+                "crates/y/src/lib.rs": "",
+                "crates/z/src/lib.rs": "",
+                "crates/w/src/lib.rs": "",
+                "crates/t/src/lib.rs": "",
+            },
+            {
+                "Cargo.toml", "crates/x/Cargo.toml", "crates/x/src/lib.rs", "crates/y/Cargo.toml",
+                "crates/y/src/lib.rs", "crates/z/src/lib.rs", "crates/w/src/lib.rs",
+            },
         )
 
     def test_scikit_build_is_unresolved_but_tracks_cmake(self):

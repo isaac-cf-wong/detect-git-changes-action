@@ -204,7 +204,7 @@ def table(data, *keys):
 def str_list(value):
     if isinstance(value, str):
         return [value]
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [v for v in value if isinstance(v, str)]
     return []
 
@@ -1309,6 +1309,62 @@ def uv(c, data, sha):
         c.add(directory)
 
 
+def cargo_manifest(c, crate, sha):
+    """A crate's parsed Cargo.toml, {} when there is none, None when it does not parse."""
+    path = posixpath.join(crate, "Cargo.toml") if crate else "Cargo.toml"
+    text = git_show(sha, path)
+    if text is None:
+        return {}
+    try:
+        return tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        c.unresolved(f"maturin: {path} does not parse, so its path dependencies are unknown: {exc}")
+        return None
+
+
+def cargo_paths(c, crate, tables):
+    """Add the ``path`` of every dependency in ``tables``; the crates they name."""
+    found = []
+    for deps in tables:
+        for dep in deps.values() if isinstance(deps, dict) else ():
+            if isinstance(dep, dict) and isinstance(dep.get("path"), str):
+                target = clean(posixpath.join(crate, dep["path"]))
+                if target is None:
+                    c.unresolved(f"maturin: path dependency {dep['path']!r} of {crate or '.'} leaves the repository")
+                elif target not in found:
+                    c.add(target)
+                    found.append(target)
+    return found
+
+
+def cargo_workspace_paths(c, root, sha):
+    """Path entries a workspace manifest shares with its members: [workspace.dependencies], [patch.*]."""
+    manifest = cargo_manifest(c, root, sha)
+    if manifest:
+        tables = [table(manifest, "workspace", "dependencies"), *table(manifest, "patch").values()]
+        for target in cargo_paths(c, root, tables):
+            cargo_path_dependencies(c, target, sha, set())
+
+
+def cargo_path_dependencies(c, crate, sha, seen):
+    """Track the local crates a crate builds against, through ``path`` dependencies.
+
+    Dev-dependencies are left out: they build tests, not the extension.
+    """
+    if crate in seen:
+        return
+    seen.add(crate)
+    manifest = cargo_manifest(c, crate, sha)
+    if not manifest:
+        return
+    tables = [manifest.get("dependencies"), manifest.get("build-dependencies")]
+    for target in table(manifest, "target").values():
+        if isinstance(target, dict):
+            tables += [target.get("dependencies"), target.get("build-dependencies")]
+    for dep in cargo_paths(c, crate, tables):
+        cargo_path_dependencies(c, dep, sha, seen)
+
+
 def maturin(c, data, sha):
     tool = table(data, "tool", "maturin")
     manifest = tool.get("manifest-path", "Cargo.toml")
@@ -1324,11 +1380,15 @@ def maturin(c, data, sha):
                 path = posixpath.join(parent, name) if parent else name
                 if c.tree.is_file(path):
                     c.add(path)
+                    if name == "Cargo.toml":
+                        cargo_workspace_paths(c, parent, sha)
     else:
         # The crate at the repository root: its manifest, lock file, build
         # script and Rust sources.
         for path in ("Cargo.toml", "Cargo.lock", "build.rs", "src"):
             c.add(path)
+        cargo_workspace_paths(c, "", sha)
+    cargo_path_dependencies(c, crate, sha, set())
     module = tool.get("module-name")
     if not isinstance(module, str):
         module = re.sub(r"[-.]+", "_", project_name(data) or "")

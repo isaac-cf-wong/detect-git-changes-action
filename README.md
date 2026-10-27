@@ -160,8 +160,9 @@ Package sources are located per build backend:
 - **uv_build**: `[tool.uv.build-backend]` `module-root` and `module-name`.
 - **maturin**: `Cargo.toml`, `Cargo.lock`, `build.rs` and `src/` (or the
   `manifest-path` crate, with the `Cargo.toml` and `Cargo.lock` of any directory
-  above it, where a Cargo workspace keeps them), plus `python-source` and
-  `data`.
+  above it, where a Cargo workspace keeps them), the local crates it builds
+  against through `path` dependencies (its own, `[workspace.dependencies]` and
+  `[patch]`, but not dev-dependencies), plus `python-source` and `data`.
 
 When the sources cannot be located, the action warns and says why: a `setup.py`
 that computes its arguments, a build hook (a hatch custom hook, `pdm_build.py`,

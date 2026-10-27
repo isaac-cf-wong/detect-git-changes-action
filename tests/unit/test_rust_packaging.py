@@ -178,6 +178,24 @@ class SourceScanTest(CrateTest):
         c = self.resolve({"Cargo.toml": CRATE, "src/lib.rs": '#[path = "../gone.rs"]\nmod gone;\n'})
         self.assertTrue(any("#[path]" in p for p in c.problems), c.problems)
 
+    def explicit_bin_root(self, inferred):
+        up = "../" * inferred.count("/")
+        c = self.resolve(
+            {
+                "Cargo.toml": CRATE + 'autobins = false\n[[bin]]\nname = "tool"\n',
+                inferred: f'mod inline {{\n    #[path = "{up}../external.rs"]\n    mod x;\n}}\nfn main() {{}}\n',
+                "external.rs": "",
+            }
+        )
+        self.assertEqual(c.problems, [])
+        self.assertIn("external.rs", self.matched(c))
+
+    def test_explicit_bin_without_path_is_a_crate_root(self):
+        self.explicit_bin_root("src/bin/tool.rs")
+
+    def test_explicit_bin_without_path_in_a_directory_is_a_crate_root(self):
+        self.explicit_bin_root("src/bin/tool/main.rs")
+
     def test_library_outside_src_tracks_its_modules(self):
         self.assert_matches(
             {

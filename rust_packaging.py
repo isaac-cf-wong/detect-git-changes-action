@@ -556,6 +556,15 @@ class Project:
                 if f.startswith(f"{bin_dir}/") and f.endswith(".rs") and f[len(bin_dir) + 1 :].count("/") <= 1
                 and ("/" not in f[len(bin_dir) + 1 :] or f.endswith("/main.rs"))
             ]
+        # An explicit [[bin]] without a `path` is still found by convention,
+        # whether or not autobins is on.
+        for b in bins:
+            name = b.get("name")
+            if isinstance(name, str) and not isinstance(b.get("path"), str):
+                inferred = [f"src/bin/{name}.rs", f"src/bin/{name}/main.rs"]
+                if name == package.get("name"):
+                    inferred.insert(0, "src/main.rs")
+                default_roots += [join(crate, f) for f in inferred]
         self.scanner.roots.update(r for r in roots + default_roots if r)
         if bins or (autobins and (c.tree.is_file(join(crate, "src/main.rs")) or c.tree.is_dir(join(crate, "src/bin")))):
             self.binaries.add(crate)

@@ -693,6 +693,22 @@ class SetuptoolsTest(LayoutTest):
             {"pkg/__init__.py", "build_tools/versioning.py"},
         )
 
+    def test_sys_path_insertion_through_a_module_alias(self):
+        for snippet in (
+            'import sys as system\nsystem.path.insert(0, "build_meta")\n',
+            'import site as s\ns.addsitedir("build_meta")\n',
+        ):
+            with self.subTest(snippet=snippet):
+                self.assert_matches(
+                    {
+                        "setup.py": "from setuptools import setup\n" + snippet
+                        + 'from version import VERSION\nsetup(name="x", version=VERSION, packages=["pkg"])\n',
+                        "pkg/__init__.py": "",
+                        "build_meta/version.py": "",
+                    },
+                    {"pkg/__init__.py", "build_meta/version.py"},
+                )
+
     def test_sys_path_insertion_of_a_str_wrapped_path(self):
         self.assert_matches(
             {
@@ -889,6 +905,11 @@ class SetuptoolsTest(LayoutTest):
             'sys.path[:0] = ["build_meta"]\n',
             'sys.path += ["build_meta"]\n',
             'from sys import path\npath.insert(0, "build_meta")\n',
+            'import sys as system\nsystem.path[:0] = ["build_meta"]\n',
+            'module = sys\nmodule.path.insert(0, "build_meta")\n',
+            'getattr(sys, "path").insert(0, "build_meta")\n',
+            'from sys import *\npath.insert(0, "build_meta")\n',
+            'from site import addsitedir\naddsitedir("build_meta")\n',
         ):
             with self.subTest(snippet=snippet):
                 c = self.resolve(
@@ -899,7 +920,7 @@ class SetuptoolsTest(LayoutTest):
                         "build_meta/version.py": "",
                     }
                 )
-                self.assertTrue(any("sys.path" in p for p in c.problems), c.problems)
+                self.assertTrue(any("sys.path" in p or "site" in p for p in c.problems), c.problems)
 
     def test_read_through_a_symlink_tracks_its_referent(self):
         self.assert_matches(
@@ -959,6 +980,82 @@ class SymlinkTest(LayoutTest):
             links={"pkg/data.json": "../../outside/data.json"},
         )
         self.assertTrue(any("symlink" in p for p in c.problems))
+
+
+    def test_symlink_matched_by_a_glob_tracks_its_referent(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": SETUPTOOLS + '[project]\nname = "x"\ndynamic = ["dependencies"]\n'
+                '[tool.setuptools]\npackages = ["pkg"]\n'
+                '[tool.setuptools.dynamic]\ndependencies = { file = ["requirements/*.txt"] }\n',
+                "pkg/__init__.py": "",
+                "shared/requirements.txt": "",
+            },
+            {"pkg/__init__.py", "requirements/input.txt", "shared/requirements.txt"},
+            links={"requirements/input.txt": "../shared/requirements.txt"},
+        )
+
+    def test_symlink_matched_by_a_leading_double_star_tracks_its_referent(self):
+        # hatchling's include = ["*.json"] means **/*.json, which matches at the root too.
+        self.assert_matches(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n'
+                '[tool.hatch.build.targets.wheel]\ninclude = ["x", "*.json"]\n',
+                "x/__init__.py": "",
+                "shared/schema.src": "",
+            },
+            {"x/__init__.py", "schema.json", "shared/schema.src"},
+            links={"schema.json": "shared/schema.src"},
+        )
+
+    def test_symlinked_directory_above_a_glob_tracks_its_referent(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": SETUPTOOLS + '[project]\nname = "x"\ndynamic = ["dependencies"]\n'
+                '[tool.setuptools]\npackages = ["pkg"]\n'
+                '[tool.setuptools.dynamic]\ndependencies = { file = ["requirements/*.txt"] }\n',
+                "pkg/__init__.py": "",
+                "shared/base.txt": "",
+                "shared/notes.md": "",
+            },
+            {"pkg/__init__.py", "requirements", "shared/base.txt"},
+            links={"requirements": "shared"},
+        )
+
+    def test_symlinked_directory_above_a_path_tracks_its_referent(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n[tool.hatch.build.targets.wheel]\npackages = ["src/pkg"]\n',
+                "lib/pkg/__init__.py": "",
+                "lib/other.py": "",
+            },
+            {"src", "lib/pkg/__init__.py"},
+            links={"src": "lib"},
+        )
+
+    def test_long_symlink_chain_reaches_its_end(self):
+        links = {f"link{i}": f"link{i + 1}" for i in range(12)}
+        links["link12"] = "metadata/VERSION"
+        self.assert_matches(
+            {
+                "setup.py": 'from pathlib import Path\nfrom setuptools import setup\n'
+                'setup(name="x", version=Path("link0").read_text(), packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "metadata/VERSION": "",
+            },
+            {"pkg/__init__.py", "metadata/VERSION", *links},
+            links=links,
+        )
+
+    def test_symlink_loop_is_unresolved(self):
+        c = self.resolve(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+                "pkg/__init__.py": "",
+            },
+            links={"pkg/data": "../pkg/data/nested"},
+        )
+        self.assertTrue(any("symlink" in p for p in c.problems), c.problems)
 
 
 class OtherBackendsTest(LayoutTest):

@@ -200,6 +200,35 @@ def is_pattern(path):
 # ── Collecting pathspecs ────────────────────────────────────────────
 
 
+# As many as Linux follows before giving up with ELOOP.
+MAX_SYMLINK_HOPS = 40
+
+
+def glob_rests(pattern, path):
+    """How a git ``:(glob)`` pattern, as components, can continue below ``path``.
+
+    One tuple of remaining components per way the pattern's leading components
+    match ``path``'s; an empty tuple when the pattern matches ``path`` itself or a
+    directory above it, which the ``/**`` companion pathspec then covers.
+    """
+    rests = set()
+
+    def walk(i, j):
+        if i == len(pattern):
+            rests.add(())
+        elif j == len(path):
+            rest = tuple(pattern[i:])
+            rests.add(() if all(p == "**" for p in rest) else rest)
+        elif pattern[i] == "**":
+            walk(i + 1, j)
+            walk(i, j + 1)
+        elif fnmatch.fnmatchcase(path[j], pattern[i]):
+            walk(i + 1, j + 1)
+
+    walk(0, 0)
+    return rests
+
+
 class Collector:
     """The pathspecs found for one revision and the reasons any were missed."""
 
@@ -213,33 +242,50 @@ class Collector:
         if spec not in self.paths:
             self.paths.append(spec)
 
-    def add(self, path, _depth=0):
+    def add(self, path, _hops=0):
         """A file or directory; a git pathspec without wildcards matches both.
 
-        A symlink at or under the path changes nothing in the diff when its target
-        is edited, so each one's target is added too.
+        A symlink at, under or above the path changes nothing in the diff when
+        the file it leads to is edited, so where it leads is added too.
         """
         path = clean(path)
-        if not path:
-            return
-        spec = f":(literal){path}"
-        if spec in self.paths and _depth == 0:
-            return
-        self._append(spec)
-        if _depth > 10:
+        if not path or not self._enter(f":(literal){path}", path, _hops):
             return
         for link, target in self.tree.links.items():
             if link == path or link.startswith(f"{path}/"):
-                if target is None:
-                    self.unresolved(f"symlink {link} points outside the repository")
-                elif target != path:
-                    self.add(target, _depth + 1)
+                self._follow(link, target, lambda t: self.add(t, _hops + 1))
+            elif path.startswith(f"{link}/"):
+                self._append(f":(literal){link}")
+                self._follow(link, target, lambda t: self.add(posixpath.join(t, path[len(link) + 1 :]), _hops + 1))
 
-    def add_glob(self, pattern):
+    def add_glob(self, pattern, _hops=0):
         pattern = clean(pattern)
-        if pattern:
-            self._append(f":(glob){pattern}")
-            self._append(f":(glob){pattern}/**")
+        if not pattern or not self._enter(f":(glob){pattern}", pattern, _hops):
+            return
+        self._append(f":(glob){pattern}/**")
+        for link, target in self.tree.links.items():
+            for rest in glob_rests(pattern.split("/"), link.split("/")):
+                if not rest:
+                    self._follow(link, target, lambda t: self.add(t, _hops + 1))
+                else:
+                    self._append(f":(literal){link}")
+                    self._follow(link, target, lambda t: self.add_glob(posixpath.join(t, *rest), _hops + 1))
+
+    def _enter(self, spec, path, hops):
+        """Add ``spec``; False when it is already there or symlinks loop."""
+        if spec in self.paths:
+            return False
+        if hops > MAX_SYMLINK_HOPS:
+            self.unresolved(f"symlinks leading to {path} loop or nest more than {MAX_SYMLINK_HOPS} deep")
+            return False
+        self._append(spec)
+        return True
+
+    def _follow(self, link, target, then):
+        if target is None:
+            self.unresolved(f"symlink {link} points outside the repository")
+        else:
+            then(target)
 
     def add_path_or_glob(self, path):
         if isinstance(path, str) and is_pattern(path):
@@ -259,7 +305,8 @@ class Collector:
         self.add_glob(pattern if anchored else f"**/{pattern}")
 
     def unresolved(self, reason):
-        self.problems.append(reason)
+        if reason not in self.problems:
+            self.problems.append(reason)
 
     def build_hook(self, path, backend):
         """Code that runs during the build can add files no configuration names."""
@@ -635,7 +682,8 @@ def scan_python(c, path, module=None, seen=None):
     and ``dirname()``, anchored where they are anchored (the file's own
     directory for ``__file__``, the working directory otherwise); local modules
     imported statically, through a literal ``importlib.import_module()``, or
-    from a directory added to ``sys.path``, each scanned in turn. A name is
+    from a directory added to ``sys.path`` (by whatever name ``sys`` is
+    imported under), each scanned in turn. A name is
     followed only when it is bound exactly once in the file; a reader helper is
     followed through its call sites. Anything else that reads a file or imports
     a module -- a path or name that cannot be worked out, a form not recognised
@@ -815,13 +863,29 @@ def scan_python(c, path, module=None, seen=None):
         return envs
 
     # Directories added to sys.path, searched by later imports. Only a direct
-    # sys.path.insert()/append() or site.addsitedir() is understood; any other
-    # use of sys.path -- an alias, slice assignment, +=, `from sys import path`
-    # -- could add a directory the imports below would miss, so it is reported.
+    # sys.path.insert()/append() or site.addsitedir() is understood, through
+    # whatever name `import sys`/`import site` binds; any other use of sys.path
+    # -- an alias, slice assignment, +=, `from sys import path`, the module
+    # itself passed around -- could add a directory the imports below would
+    # miss, so it is reported.
     import_bases = ["", "src"]
+    module_names = {"sys": set(), "site": set()}
+    for node in ast.walk(module):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in module_names:
+                    module_names[a.name].add(a.asname or a.name)
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module in module_names:
+            imported = {a.name for a in node.names}
+            if imported & {"path", "addsitedir", "*"}:
+                unresolved(node, f"imports {node.module}.{'path' if node.module == 'sys' else 'addsitedir'}", "effect on imports")
 
     def is_sys_path(node):
-        return isinstance(node, ast.Attribute) and node.attr == "path" and getattr(node.value, "id", None) == "sys"
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr == "path"
+            and getattr(node.value, "id", None) in module_names["sys"]
+        )
 
     direct = {
         id(n.func.value)
@@ -829,16 +893,22 @@ def scan_python(c, path, module=None, seen=None):
         if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("insert", "append")
         and is_sys_path(n.func.value)
     }
+    attribute_receivers = {id(n.value) for n in ast.walk(module) if isinstance(n, ast.Attribute)}
     for node in ast.walk(module):
         if is_sys_path(node) and id(node) not in direct:
             unresolved(node, "uses sys.path in a way", "effect on imports")
-        elif isinstance(node, ast.ImportFrom) and node.module == "sys" and any(a.name == "path" for a in node.names):
-            unresolved(node, "imports sys.path", "effect on imports")
+        elif (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id in module_names["sys"] | module_names["site"]
+            and id(node) not in attribute_receivers
+        ):
+            unresolved(node, f"passes the module {node.id} around, which may reach sys.path", "effect on imports")
     for node in ast.walk(module):
         if not (isinstance(node, ast.Call) and call_name(node) in SYS_PATH_CALLS and isinstance(node.func, ast.Attribute)):
             continue
         receiver = node.func.value
-        if not (is_sys_path(receiver) or getattr(receiver, "id", None) == "site"):
+        if not (is_sys_path(receiver) or getattr(receiver, "id", None) in module_names["site"]):
             continue
         anchored = joined(node.args[-1]) if node.args else None
         targets = anchored.candidates(here) if anchored else None

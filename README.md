@@ -111,25 +111,29 @@ composes with `/`, `os.path.join()`, `Path()`, `.parent` or `dirname()`,
 anchored where they point (the file's own directory for `__file__`); and the
 local modules it imports, statically, through a literal
 `importlib.import_module()` (relative names through its `package` argument) or
-from a directory added by a direct `sys.path.insert()` / `append()`, read the
-same way in turn. A name is followed only when it is bound once in the file, and
-a reader helper such as `read("README.md")` is followed through its direct call
-sites. Anything else counts as not located (see below): a read or import whose
-path or name cannot be worked out, a reader function referenced other than by a
-direct call (an alias, a callback, a caller in another file), any other use of
-`sys.path`, a hatch custom or unknown metadata hook, and an unknown version
-source. `open()` and `os.open()` in a write-only mode are not reads. Version
-sources that take the version from git (`vcs`, `uv-dynamic-versioning`,
-`versioningit`) read no repository file.
+from a directory added by a direct `sys.path.insert()` / `append()` or
+`site.addsitedir()` (under whatever name `import sys` or `import site` binds),
+read the same way in turn. A name is followed only when it is bound once in the
+file, and a reader helper such as `read("README.md")` is followed through its
+direct call sites. Anything else counts as not located (see below): a read or
+import whose path or name cannot be worked out, a reader function referenced
+other than by a direct call (an alias, a callback, a caller in another file),
+any other use of `sys.path` or of the `sys` and `site` modules themselves, a
+hatch custom or unknown metadata hook, and an unknown version source. `open()`
+and `os.open()` in a write-only mode are not reads. Version sources that take
+the version from git (`vcs`, `uv-dynamic-versioning`, `versioningit`) read no
+repository file.
 
 This reading is a heuristic: arbitrary Python cannot be followed completely
 without running it. It is built to fail open, reporting what it cannot work out
 rather than guessing. For a build whose inputs it does not see, list them in
 `paths`.
 
-A symlink in a tracked location changes nothing in the diff when the file it
-points to is edited, so the target is tracked too; a symlink that points outside
-the repository counts as not located.
+A symlink changes nothing in the diff when the file it points to is edited, so
+for every symlink at, under or above a tracked path, or matched by a tracked
+pattern, the target is tracked too, through chains of symlinks. A symlink that
+points outside the repository, or symlinks that loop or nest more than 40 deep,
+count as not located.
 
 Package sources are located per build backend:
 

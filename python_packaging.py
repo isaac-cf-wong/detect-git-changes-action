@@ -2,10 +2,12 @@
 
 Usage::
 
-    python_packaging.py material <base-sha> <head-sha>
-        Exit 0 if pyproject.toml differs between the revisions in a table that
-        reaches the built distribution, 1 if it does not, 2 if either revision
-        cannot be read or parsed (the caller treats that as material).
+    python_packaging.py material <base-sha> <head-sha> [pyproject.toml|hatch.toml]
+        Exit 0 if the build configuration differs between the revisions in a
+        table that reaches the built distribution, 1 if it does not, 2 if either
+        revision cannot be read or parsed (the caller treats that as material).
+        With a file name, only that file's tables are compared; without one,
+        pyproject.toml with hatch.toml merged in.
 
     python_packaging.py package-paths <base-sha> <head-sha>
         Print one git pathspec per line for the files that go into the built
@@ -97,7 +99,7 @@ def git_show(sha, path):
     return result.stdout.decode("utf-8")
 
 
-def load(sha):
+def load(sha, merge_hatch=True):
     """Parse pyproject.toml at a revision; None when the file does not exist there.
 
     A hatch.toml beside it is merged into [tool.hatch] the way hatchling does:
@@ -107,7 +109,7 @@ def load(sha):
     if text is None:
         return None
     data = tomllib.loads(text)
-    hatch_text = git_show(sha, HATCH_TOML)
+    hatch_text = git_show(sha, HATCH_TOML) if merge_hatch else None
     if hatch_text is not None:
         tool = data.setdefault("tool", {})
         if isinstance(tool, dict):
@@ -934,8 +936,8 @@ def scan_python(c, path, module=None, seen=None, imported=False):
                 if a.name in module_names:
                     module_names[a.name].add(a.asname or a.name)
         elif isinstance(node, ast.ImportFrom) and not node.level and node.module in module_names:
-            imported = {a.name for a in node.names}
-            if imported & {"path", "addsitedir", "*"}:
+            names = {a.name for a in node.names}
+            if names & {"path", "addsitedir", "*"}:
                 unresolved(node, f"imports {node.module}.{'path' if node.module == 'sys' else 'addsitedir'}", "effect on imports")
 
     def is_sys_path(node):
@@ -1456,8 +1458,20 @@ def material_view(data):
     return view
 
 
-def material(base_sha, head_sha):
-    base, head = load(base_sha), load(head_sha)
+def load_hatch_toml(sha):
+    text = git_show(sha, HATCH_TOML)
+    return None if text is None else {"tool": {"hatch": tomllib.loads(text)}}
+
+
+def material(base_sha, head_sha, path=None):
+    """Whether the packaging tables differ: of ``path`` alone (pyproject.toml or
+    hatch.toml) when given, so a tooling-only edit to one is not carried by a
+    build edit to the other; of both merged otherwise."""
+    if path == HATCH_TOML:
+        base, head = load_hatch_toml(base_sha), load_hatch_toml(head_sha)
+    else:
+        merge = path is None
+        base, head = load(base_sha, merge), load(head_sha, merge)
     if base is None or head is None:
         # Added or removed outright: that changes how the package is built.
         return base is not head
@@ -1502,13 +1516,13 @@ def package_paths(sha):
 
 
 def main(argv):
-    if len(argv) != 4 or argv[1] not in ("material", "package-paths"):
+    if len(argv) not in (4, 5) or argv[1] not in ("material", "package-paths") or (len(argv) == 5 and argv[1] != "material"):
         print(__doc__, file=sys.stderr)
         return 2
-    command, base_sha, head_sha = argv[1:]
+    command, base_sha, head_sha = argv[1:4]
     if command == "material":
         try:
-            return 0 if material(base_sha, head_sha) else 1
+            return 0 if material(base_sha, head_sha, argv[4] if len(argv) == 5 else None) else 1
         except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
             print(f"Cannot parse {PYPROJECT} or {HATCH_TOML}: {exc}", file=sys.stderr)
             return 2

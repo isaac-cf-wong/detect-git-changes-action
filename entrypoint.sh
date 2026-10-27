@@ -13,14 +13,11 @@ split_list() {
 }
 
 # Write the three outputs. Arguments are the changed files, one per argument;
-# --first-release alone reports a change with no files to compare against.
+# FIRST_RELEASE=true reports a change with no files to compare against.
 write_outputs() {
 	local delimiter
 	delimiter="EOF_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
-	if [[ "${1:-}" == "--first-release" ]]; then
-		shift
-		echo "has_changes=true" >>"${GITHUB_OUTPUT}"
-	elif [[ $# -gt 0 ]]; then
+	if [[ $# -gt 0 || "${FIRST_RELEASE:-false}" == "true" ]]; then
 		echo "has_changes=true" >>"${GITHUB_OUTPUT}"
 	else
 		echo "has_changes=false" >>"${GITHUB_OUTPUT}"
@@ -50,7 +47,7 @@ if [[ "${INPUT_USE_LATEST_TAG:-false}" == "true" ]]; then
 	BASE_REF=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
 	if [[ -z "$BASE_REF" ]]; then
 		echo "No tags found → treating as first release (has changes = true)"
-		write_outputs --first-release
+		FIRST_RELEASE=true write_outputs
 		exit 0
 	fi
 	echo "::notice::Using latest tag as base: $BASE_REF"
@@ -181,7 +178,7 @@ changed=()
 while IFS= read -r f; do
 	if [[ "${NARROW_CONFIG}" == "true" && ("${f}" == "pyproject.toml" || "${f}" == "hatch.toml") ]]; then
 		rc=0
-		"${PYTHON}" "${ACTION_DIR}/python_packaging.py" material "${BASE_SHA}" "${HEAD_SHA}" </dev/null || rc=$?
+		"${PYTHON}" "${ACTION_DIR}/python_packaging.py" material "${BASE_SHA}" "${HEAD_SHA}" "${f}" </dev/null || rc=$?
 		if [[ ${rc} -eq 1 ]]; then
 			echo "${f} changed outside its packaging tables → not material"
 			continue

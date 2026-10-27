@@ -1033,6 +1033,18 @@ class SetuptoolsTest(LayoutTest):
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stderr, "")
 
+    def test_from_sys_import_does_not_disable_reader_helpers(self):
+        self.assert_matches(
+            {
+                "setup.py": "from sys import argv\nfrom setuptools import setup\n"
+                "def read(name):\n    return open(name).read()\n"
+                'setup(name="x", long_description=read("NOTES.md"), packages=["pkg"])\n',
+                "NOTES.md": "",
+                "pkg/__init__.py": "",
+            },
+            {"NOTES.md", "pkg/__init__.py"},
+        )
+
     def test_os_open_with_write_only_flags_is_not_a_read(self):
         self.assert_matches(
             {
@@ -1500,6 +1512,23 @@ class CommandTest(LayoutTest):
         build = self.commit({"hatch.toml": '[build.targets.wheel]\npackages = ["y"]\n[envs.default]\ndependencies = ["pytest>=8"]\n'})
         self.assertFalse(python_packaging.material(base, envs_only))
         self.assertTrue(python_packaging.material(envs_only, build))
+
+    def test_material_judges_each_config_file_on_its_own(self):
+        base = self.commit(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n[tool.ruff]\nline-length = 100\n',
+                "hatch.toml": '[build.targets.wheel]\npackages = ["x"]\n',
+            }
+        )
+        head = self.commit(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n[tool.ruff]\nline-length = 120\n',
+                "hatch.toml": '[build.targets.wheel]\npackages = ["y"]\n',
+            }
+        )
+        self.assertFalse(python_packaging.material(base, head, "pyproject.toml"))
+        self.assertTrue(python_packaging.material(base, head, "hatch.toml"))
+        self.assertTrue(python_packaging.material(base, head))
 
     def test_package_paths_exit_code_when_unresolved(self):
         sha = self.commit({"setup.py": "from setuptools import setup\nsetup(**CONFIG)\n"})

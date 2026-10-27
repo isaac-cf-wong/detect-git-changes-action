@@ -132,6 +132,17 @@ teardown() {
 	[ "$(output_value changed_files_count)" = "0" ]
 }
 
+@test "a changed file named like an internal flag is still listed" {
+	echo "x" >./--first-release
+	commit_all "odd name"
+
+	run bash "$SCRIPT_PATH"
+
+	[ "$status" -eq 0 ]
+	[ "$(output_value changed_files_count)" = "1" ]
+	[ "$(changed_files)" = "--first-release" ]
+}
+
 @test "exclude-paths honours the short exclude forms :! and :^" {
 	echo "more" >>docs/index.md
 	echo "y = 2" >>src/demo/__init__.py

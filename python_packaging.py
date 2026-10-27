@@ -137,6 +137,25 @@ class Tree:
                 self.dirs.add(parent)
                 parent = posixpath.dirname(parent)
 
+    def loops(self, link):
+        """True when resolving ``link`` as the OS would never ends: it revisits a
+        path, or takes more than MAX_SYMLINK_HOPS hops."""
+        path, seen = link, set()
+        while len(seen) <= MAX_SYMLINK_HOPS:
+            if path in seen:
+                return True
+            seen.add(path)
+            if path in self.links:
+                path = self.links[path]
+            else:
+                above = next((l for l in self.links if path.startswith(f"{l}/")), None)
+                if above is None:
+                    return False
+                path = posixpath.join(self.links[above], path[len(above) + 1 :]) if self.links[above] else None
+            if path is None:
+                return False  # leaves the repository, reported on its own
+        return True
+
     def is_file(self, path):
         return path in self.files
 
@@ -284,6 +303,8 @@ class Collector:
     def _follow(self, link, target, then):
         if target is None:
             self.unresolved(f"symlink {link} points outside the repository")
+        elif self.tree.loops(link):
+            self.unresolved(f"symlink {link} loops or nests more than {MAX_SYMLINK_HOPS} deep")
         else:
             then(target)
 

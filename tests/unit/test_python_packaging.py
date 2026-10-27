@@ -1057,6 +1057,16 @@ class SymlinkTest(LayoutTest):
         )
         self.assertTrue(any("symlink" in p for p in c.problems), c.problems)
 
+    def test_cycle_of_symlinks_is_unresolved(self):
+        c = self.resolve(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+                "pkg/__init__.py": "",
+            },
+            links={"pkg/a": "b", "pkg/b": "a"},
+        )
+        self.assertTrue(any("symlink pkg/a loops" in p or "symlink pkg/b loops" in p for p in c.problems), c.problems)
+
 
 class OtherBackendsTest(LayoutTest):
     def test_poetry_packages_from(self):

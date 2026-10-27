@@ -195,6 +195,56 @@ class HatchTest(LayoutTest):
             {"pkg/__init__.py", "VERSION.py"},
         )
 
+    def test_code_version_source_search_paths(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\ndynamic = ["version"]\n'
+                '[tool.hatch.version]\nsource = "code"\npath = "version_source.py"\n'
+                'search-paths = ["version_helpers"]\n'
+                '[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+                "pkg/__init__.py": "",
+                "version_source.py": "",
+                "version_helpers/version.py": "",
+            },
+            {"pkg/__init__.py", "version_source.py", "version_helpers/version.py"},
+        )
+
+    def test_git_derived_version_sources_are_resolved(self):
+        for source in ("vcs", "uv-dynamic-versioning", "versioningit"):
+            with self.subTest(source=source):
+                self.assert_matches(
+                    {
+                        "pyproject.toml": HATCH + '[project]\nname = "x"\ndynamic = ["version"]\n'
+                        f'[tool.hatch.version]\nsource = "{source}"\n'
+                        '[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+                        "pkg/__init__.py": "",
+                    },
+                    {"pkg/__init__.py"},
+                )
+
+    def test_nodejs_version_source_tracks_package_json(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\ndynamic = ["version"]\n'
+                '[tool.hatch.version]\nsource = "nodejs"\n'
+                '[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+                "pkg/__init__.py": "",
+                "package.json": "{}",
+            },
+            {"pkg/__init__.py", "package.json"},
+        )
+
+    def test_unknown_version_source_is_unresolved(self):
+        c = self.resolve(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\ndynamic = ["version"]\n'
+                '[tool.hatch.version]\nsource = "something-new"\n'
+                '[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+                "pkg/__init__.py": "",
+            }
+        )
+        self.assertTrue(any("version source" in p for p in c.problems))
+
     def test_requirements_txt_metadata_hook(self):
         self.assert_matches(
             {
@@ -498,6 +548,57 @@ class SetuptoolsTest(LayoutTest):
             {"pkg/__init__.py", "README.md", "VERSION"},
         )
 
+    def test_setup_py_composed_paths(self):
+        self.assert_matches(
+            {
+                "setup.py": """\
+                    import os
+                    from pathlib import Path
+                    from setuptools import setup
+
+                    here = os.path.abspath(os.path.dirname(__file__))
+                    version = (Path(__file__).parent / "metadata" / "VERSION").read_text().strip()
+                    with open(os.path.join(here, "docs", "LONG.md")) as f:
+                        long_description = f.read()
+                    setup(name="x", version=version, packages=["pkg"], long_description=long_description)
+                    """,
+                "pkg/__init__.py": "",
+                "metadata/VERSION": "",
+                "docs/LONG.md": "",
+                "docs/other.md": "",
+            },
+            {"pkg/__init__.py", "metadata/VERSION", "docs/LONG.md"},
+        )
+
+    def test_setup_py_unresolvable_file_read_is_unresolved(self):
+        c = self.resolve(
+            {
+                "setup.py": """\
+                    import sys
+                    from setuptools import setup
+
+                    with open(sys.argv[-1]) as f:
+                        notes = f.read()
+                    setup(name="x", packages=["pkg"])
+                    """,
+                "pkg/__init__.py": "",
+            }
+        )
+        self.assertTrue(any("reads a file" in p for p in c.problems))
+
+    def test_setup_py_imports_a_root_module(self):
+        self.assert_matches(
+            {
+                "setup.py": 'from setuptools import setup\nfrom _build_meta import VERSION\nimport helpers.ver\n'
+                'setup(name="x", version=VERSION, packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "_build_meta.py": "",
+                "helpers/ver.py": "",
+                "unrelated.py": "",
+            },
+            {"pkg/__init__.py", "_build_meta.py", "helpers/ver.py"},
+        )
+
     def test_setup_py_computed_packages_is_unresolved(self):
         c = self.resolve(
             {
@@ -569,6 +670,44 @@ class OtherBackendsTest(LayoutTest):
             },
             {"src/x/__init__.py", "meta/version.py"},
         )
+
+    def test_pdm_call_version_getter_is_scanned(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": '[build-system]\nbuild-backend = "pdm.backend"\n[project]\nname = "x"\n'
+                'dynamic = ["version"]\n[tool.pdm.version]\nsource = "call"\n'
+                'getter = "scripts.version:get_version"\n',
+                "src/x/__init__.py": "",
+                "scripts/version.py": "from pathlib import Path\nfrom scripts import util\n\n"
+                "def get_version():\n    return (Path(__file__).parent / 'VERSION').read_text()\n",
+                "scripts/util.py": "",
+                "scripts/VERSION": "",
+                "scripts/other.py": "",
+            },
+            {"src/x/__init__.py", "scripts/version.py", "scripts/util.py", "scripts/VERSION"},
+        )
+
+    def test_code_version_source_file_is_scanned(self):
+        c = self.resolve(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\ndynamic = ["version"]\n'
+                '[tool.hatch.version]\nsource = "code"\npath = "version_source.py"\n'
+                '[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+                "pkg/__init__.py": "",
+                "version_source.py": "import os\nVERSION = open(os.environ['VERSION_FILE']).read()\n",
+            }
+        )
+        self.assertTrue(any("reads a file" in p for p in c.problems))
+
+    def test_pdm_unknown_version_source_is_unresolved(self):
+        c = self.resolve(
+            {
+                "pyproject.toml": '[build-system]\nbuild-backend = "pdm.backend"\n[project]\nname = "x"\n'
+                '[tool.pdm.version]\nsource = "exotic"\n',
+                "src/x/__init__.py": "",
+            }
+        )
+        self.assertTrue(any("version source" in p for p in c.problems))
 
     def test_poetry_default(self):
         self.assert_matches(

@@ -100,12 +100,18 @@ them should trigger a release.
 Files that fill in metadata are tracked too, since changing one changes the
 wheel's `METADATA`: setuptools `[tool.setuptools.dynamic]` `file` and `attr`
 directives and `setup.cfg` `file:` / `attr:` directives (e.g. a
-`requirements.txt` feeding `dependencies`), any tracked file a `setup.py` names
-(e.g. a README or `VERSION` it reads), hatchling's `[tool.hatch.version]` `path`
-and the files given to the `requirements_txt` and `fancy-pypi-readme` metadata
-hooks, pdm's `[tool.pdm.version]` file, and poetry's `[tool.poetry]` `readme`. A
-hatch custom metadata hook, or one the preset does not know, counts as not
-located (see below).
+`requirements.txt` feeding `dependencies`), hatchling's `[tool.hatch.version]`
+`path` and `search-paths` and the files given to the `requirements_txt` and
+`fancy-pypi-readme` metadata hooks, pdm's `[tool.pdm.version]` file or `call`
+getter module, and poetry's `[tool.poetry]` `readme`.
+
+Python that runs during the build (`setup.py`, a hatch `code` version file, a
+pdm version getter) is read, not run: the files it names, the paths it composes
+with `/`, `os.path.join()` or `Path()`, and the local modules it imports (read
+the same way in turn) are tracked. A file read whose path cannot be worked out
+that way, a hatch custom or unknown metadata hook, and an unknown version source
+count as not located (see below). Version sources that take the version from git
+(`vcs`, `uv-dynamic-versioning`, `versioningit`) read no repository file.
 
 Package sources are located per build backend:
 

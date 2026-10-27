@@ -179,8 +179,9 @@ def is_pattern(path):
 class Collector:
     """The pathspecs found for one revision and the reasons any were missed."""
 
-    def __init__(self, tree):
+    def __init__(self, tree, sha):
         self.tree = tree
+        self.sha = sha
         self.paths = []
         self.problems = []
 
@@ -309,7 +310,17 @@ def hatch(c, data, sha):
     # fill dynamic fields from files (hatch-requirements-txt,
     # hatch-fancy-pypi-readme). A hook that runs code, or one not known
     # here, may read files no configuration names.
-    c.add(table(data, "tool", "hatch", "version").get("path"))
+    version = table(data, "tool", "hatch", "version")
+    if version:
+        source = version.get("source", "regex")
+        path = version.get("path", "package.json" if source == "nodejs" else None)
+        c.add(path)
+        for directory in str_list(version.get("search-paths")):
+            c.add(directory)
+        if source == "code" and isinstance(path, str):
+            scan_python(c, clean(path) or path)
+        elif source not in KNOWN_HATCH_VERSION_SOURCES:
+            c.unresolved(f"hatchling: version source {source!r} is not one the python preset knows, and may read files")
     for name, hook in table(data, "tool", "hatch", "metadata", "hooks").items():
         if name == "custom":
             path = hook.get("path", "hatch_build.py") if isinstance(hook, dict) else "hatch_build.py"
@@ -339,6 +350,12 @@ def hatch(c, data, sha):
     if not force_include:
         c.unresolved("hatchling: no packages, include or only-include configured, and no package named after the project")
 
+
+# Version sources whose inputs are the `path` file (and, for `code`,
+# `search-paths`; for `nodejs`, package.json), or nothing in the repository:
+# vcs (hatch-vcs), uv-dynamic-versioning and versioningit derive the version
+# from git, env from the environment.
+KNOWN_HATCH_VERSION_SOURCES = ("regex", "code", "nodejs", "vcs", "uv-dynamic-versioning", "versioningit", "env")
 
 # Metadata hooks whose file inputs all appear as strings in their table.
 KNOWN_HATCH_METADATA_HOOKS = ("requirements_txt", "fancy-pypi-readme")
@@ -483,18 +500,129 @@ def call_name(node):
     return None
 
 
+# Calls whose first argument, or whose receiver when called without one, is a
+# path the build reads: open()/io.open()/codecs.open(), Path.read_text(),
+# Path.read_bytes(), Path.open(), runpy.run_path().
+FILE_READS = ("open", "read_text", "read_bytes", "run_path")
+
+
+def scan_python(c, path, module=None, seen=None):
+    """Track what a Python file run at build time reads, as far as reading it shows.
+
+    Followed: string constants naming a tracked file; paths composed with ``/``,
+    ``os.path.join()`` or ``Path()``, resolved against the repository root (the
+    build's working directory) and the file's own directory; and local modules
+    it imports, scanned in turn. A file read whose path cannot be worked out is
+    reported as unresolved.
+    """
+    seen = set() if seen is None else seen
+    if path in seen:
+        return
+    seen.add(path)
+    if module is None:
+        text = git_show(c.sha, path)
+        if text is None:
+            return
+        try:
+            module = ast.parse(text)
+        except SyntaxError as exc:
+            c.unresolved(f"{path} does not parse: {exc}")
+            return
+    here = posixpath.dirname(path)
+
+    assigned = {}
+    for node in ast.walk(module):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            assigned.setdefault(node.targets[0].id, node.value)
+
+    def joined(node, depth=0):
+        """The relative path an expression builds; "" for a base such as ``here``."""
+        if depth > 20:
+            return None
+        if isinstance(node, ast.Name) and node.id in assigned:
+            return joined(assigned[node.id], depth + 1)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            left, right = joined(node.left, depth + 1), joined(node.right, depth + 1)
+            if left is None or not right:
+                return None
+            return posixpath.join(left, right) if left else right
+        if isinstance(node, ast.Call) and call_name(node) in ("join", "Path", "PurePath"):
+            parts = [joined(arg, depth + 1) for arg in node.args]
+            if any(part is None for part in parts[1:]) or any(part == "" for part in parts[1:]):
+                return None
+            parts = [part for part in parts if part]
+            return posixpath.join(*parts) if parts else ""
+        if isinstance(node, ast.Attribute) and node.attr in ("parent", "parents"):
+            return ""
+        if isinstance(node, ast.Call) and call_name(node) in ("dirname", "abspath", "realpath", "resolve", "absolute"):
+            return ""
+        if isinstance(node, ast.Name) and node.id == "__file__":
+            return ""
+        return None
+
+    def track(candidate):
+        """Add the tracked file or directory a relative path names; True if there is one."""
+        for base in dict.fromkeys(("", here)):
+            target = clean(posixpath.join(base, candidate) if base else candidate)
+            if target and (c.tree.is_file(target) or c.tree.is_dir(target)):
+                c.add(target)
+                if target.endswith(".py") and c.tree.is_file(target):
+                    scan_python(c, target, seen=seen)
+                return True
+        return False
+
+    for node in ast.walk(module):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            target = clean(node.value)
+            if target and c.tree.is_file(target):
+                c.add(target)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                bases = [posixpath.join(here, *[".."] * (node.level - 1))]
+                names = [node.module or ""] + [f"{node.module}.{a.name}" if node.module else a.name for a in node.names]
+            else:
+                bases = ["", "src"]
+                if isinstance(node, ast.ImportFrom):
+                    names = [node.module] + [f"{node.module}.{a.name}" for a in node.names]
+                else:
+                    names = [a.name for a in node.names]
+            for name in names:
+                if not name:
+                    continue
+                for base in bases:
+                    stem = clean(posixpath.join(base, name.replace(".", "/")) if base else name.replace(".", "/"))
+                    if stem and c.tree.is_file(f"{stem}.py"):
+                        c.add(f"{stem}.py")
+                        scan_python(c, f"{stem}.py", seen=seen)
+                    elif stem and c.tree.is_file(f"{stem}/__init__.py"):
+                        c.add(f"{stem}/__init__.py")
+                        scan_python(c, f"{stem}/__init__.py", seen=seen)
+        elif isinstance(node, ast.Call) and call_name(node) in FILE_READS:
+            func = node.func
+            if node.args:
+                target = node.args[0]
+            elif isinstance(func, ast.Attribute):
+                target = func.value
+            else:
+                continue
+            candidate = joined(target)
+            if not candidate or not track(candidate):
+                c.unresolved(
+                    f"{path} reads a file whose path cannot be worked out without running it"
+                    f" (line {node.lineno}); add that file to 'paths'"
+                )
+
+
 def read_setup_py(cfg, text, c):
     try:
         module = ast.parse(text)
     except SyntaxError as exc:
         c.unresolved(f"setup.py does not parse: {exc}")
         return
-    # Any tracked file setup.py names, e.g. a README or VERSION it reads.
-    for node in ast.walk(module):
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            path = clean(node.value)
-            if path and c.tree.is_file(path):
-                c.add(path)
+    # The files setup.py reads and the local modules it imports.
+    scan_python(c, "setup.py", module)
     calls = [n for n in ast.walk(module) if isinstance(n, ast.Call) and call_name(n) == "setup"]
     if not calls:
         return
@@ -674,8 +802,23 @@ def flit(c, data, sha):
 def pdm(c, data, sha):
     build = table(data, "tool", "pdm", "build")
     version = table(data, "tool", "pdm", "version")
-    if version.get("source") == "file":
+    source = version.get("source")
+    if source == "file":
         c.add(version.get("path"))
+    elif source == "call":
+        # The getter is imported from the project root; scan its module.
+        getter = version.get("getter")
+        module = getter.split(":")[0] if isinstance(getter, str) else ""
+        stem = module.replace(".", "/")
+        for path in (f"{stem}.py", f"{stem}/__init__.py", f"src/{stem}.py", f"src/{stem}/__init__.py"):
+            if module and c.tree.is_file(path):
+                c.add(path)
+                scan_python(c, path)
+                break
+        else:
+            c.unresolved(f"pdm-backend: version getter {getter!r} not found in the repository")
+    elif source not in (None, "scm"):
+        c.unresolved(f"pdm-backend: version source {source!r} is not one the python preset knows, and may read files")
     hook = build.get("custom-hook", "pdm_build.py")
     if c.tree.is_file(clean(hook) or ""):
         c.build_hook(hook, "pdm-backend")
@@ -808,7 +951,7 @@ def declared_paths(c, data):
 
 
 def package_paths(sha):
-    c = Collector(Tree(sha))
+    c = Collector(Tree(sha), sha)
     try:
         data = load(sha)
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:

@@ -52,6 +52,20 @@ jobs:
                   [[ "${{ steps.preset_same.outputs.has-changes }}" == "false" ]] || exit 1
                   [[ "${{ steps.preset_same.outputs.changed-files-count }}" == "0" ]] || exit 1
 
+            - name: Rust preset – no Cargo.toml
+              id: rust_preset
+              uses: ./
+              with:
+                  base-ref: HEAD~1
+                  preset: rust
+
+            # This repository has no Cargo.toml, so the preset cannot locate any
+            # crate and must fail open: every file the last commit changed counts.
+            - name: Assert the rust preset fails open
+              run: |
+                  [[ "${{ steps.rust_preset.outputs.has-changes }}" == "true" ]] || exit 1
+                  [[ "${{ steps.rust_preset.outputs.changed-files-count }}" != "0" ]] || exit 1
+
             - name: Exclude everything the last commit touched
               id: excluded
               uses: ./

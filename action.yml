@@ -33,7 +33,7 @@ inputs:
     preset:
         description:
             'Optional preset that tracks the files that materially affect a
-            package. Supported: python.'
+            package. Supported: python, rust.'
         required: false
 
 outputs:

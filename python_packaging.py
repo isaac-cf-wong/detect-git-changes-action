@@ -102,10 +102,34 @@ class Tree:
     """The tracked files of a revision, for existence checks without a checkout."""
 
     def __init__(self, sha):
-        out = subprocess.run(
-            ["git", "ls-tree", "-r", "-z", "--name-only", sha], capture_output=True, check=True
-        ).stdout.decode("utf-8")
-        self.files = {f for f in out.split("\0") if f}
+        out = subprocess.run(["git", "ls-tree", "-r", "-z", sha], capture_output=True, check=True).stdout.decode("utf-8")
+        self.files = set()
+        link_blobs = {}
+        for entry in out.split("\0"):
+            if not entry:
+                continue
+            meta, path = entry.split("\t", 1)
+            mode, _, blob = meta.split(" ")
+            self.files.add(path)
+            if mode == "120000":
+                link_blobs[path] = blob
+        # A symlink's blob is its target. Resolved against the link's directory;
+        # None when it leaves the repository.
+        self.links = {}
+        if link_blobs:
+            batch = subprocess.run(
+                ["git", "cat-file", "--batch"],
+                input="\n".join(link_blobs.values()) + "\n",
+                capture_output=True,
+                check=True,
+                text=True,
+            ).stdout.splitlines()
+            targets = iter(batch)
+            for path in link_blobs:
+                next(targets)  # "<sha> blob <size>"
+                target = next(targets)
+                resolved = None if target.startswith("/") else clean(posixpath.join(posixpath.dirname(path), target))
+                self.links[path] = resolved or None
         self.dirs = set()
         for f in self.files:
             parent = posixpath.dirname(f)
@@ -189,11 +213,27 @@ class Collector:
         if spec not in self.paths:
             self.paths.append(spec)
 
-    def add(self, path):
-        """A file or directory; a git pathspec without wildcards matches both."""
+    def add(self, path, _depth=0):
+        """A file or directory; a git pathspec without wildcards matches both.
+
+        A symlink at or under the path changes nothing in the diff when its target
+        is edited, so each one's target is added too.
+        """
         path = clean(path)
-        if path:
-            self._append(f":(literal){path}")
+        if not path:
+            return
+        spec = f":(literal){path}"
+        if spec in self.paths and _depth == 0:
+            return
+        self._append(spec)
+        if _depth > 10:
+            return
+        for link, target in self.tree.links.items():
+            if link == path or link.startswith(f"{path}/"):
+                if target is None:
+                    self.unresolved(f"symlink {link} points outside the repository")
+                elif target != path:
+                    self.add(target, _depth + 1)
 
     def add_glob(self, pattern):
         pattern = clean(pattern)
@@ -581,6 +621,12 @@ def is_write_only(mode):
     )
 
 
+def is_write_only_flags(flags):
+    """True for os.open() flags that open for writing only: O_WRONLY, without O_RDWR."""
+    names = {getattr(n, "attr", None) or getattr(n, "id", None) for n in ast.walk(flags)} if flags is not None else set()
+    return "O_WRONLY" in names and "O_RDWR" not in names
+
+
 def scan_python(c, path, module=None, seen=None):
     """Track what a Python file run at build time reads, or report that it cannot be told.
 
@@ -719,22 +765,39 @@ def scan_python(c, path, module=None, seen=None):
             for node in ast.walk(top):
                 enclosing[node] = top
 
-    def environments(node):
-        """Parameter bindings at each call site of the function enclosing ``node``.
+    def parameters(func):
+        args = func.args
+        return [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs] + [
+            a.arg for a in (args.vararg, args.kwarg) if a is not None
+        ]
 
-        [None] outside a function; None when a call site cannot be bound.
+    def environments(node, target):
+        """The bindings to resolve ``target`` under: one per call site of its function.
+
+        [None] when the path does not depend on a parameter of the enclosing
+        function. None when it does and the call sites cannot all be bound: the
+        function is referenced other than by a direct call (an alias, a callback,
+        a caller in another file), or a call passes arguments that cannot be
+        bound. An empty list -- no call site -- counts as unbindable too, so a
+        read is never accepted vacuously.
         """
         func = enclosing.get(node)
-        if func is None:
+        params = parameters(func) if func is not None else []
+        used = {n.id for n in ast.walk(target) if isinstance(n, ast.Name)} if target is not None else set()
+        if func is None or not used & set(params):
             return [None]
         if bindings.get(func.name) != 1:
             return None
-        params = [a.arg for a in func.args.posonlyargs + func.args.args]
-        defaults = dict(zip(params[len(params) - len(func.args.defaults) :], func.args.defaults))
+        loads = [n for n in ast.walk(module) if isinstance(n, ast.Name) and n.id == func.name and isinstance(n.ctx, ast.Load)]
+        calls = [n for n in ast.walk(module) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == func.name]
+        if not calls or len(loads) != len(calls):
+            return None
+        positional = [a.arg for a in func.args.posonlyargs + func.args.args]
+        defaults = dict(zip(positional[len(positional) - len(func.args.defaults) :], func.args.defaults))
+        defaults.update({a.arg: d for a, d in zip(func.args.kwonlyargs, func.args.kw_defaults) if d is not None})
+        params = positional
         envs = []
-        for call in ast.walk(module):
-            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == func.name):
-                continue
+        for call in calls:
             if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
                 return None
             env = {name: [value] for name, value in defaults.items()}
@@ -746,17 +809,36 @@ def scan_python(c, path, module=None, seen=None):
                 return None
             for k in call.keywords:
                 env[k.arg] = [k.value]
+            if func.args.kwarg is not None:
+                env.pop(func.args.kwarg.arg, None)
             envs.append(env)
         return envs
 
-    # Directories added to sys.path, searched by later imports.
+    # Directories added to sys.path, searched by later imports. Only a direct
+    # sys.path.insert()/append() or site.addsitedir() is understood; any other
+    # use of sys.path -- an alias, slice assignment, +=, `from sys import path`
+    # -- could add a directory the imports below would miss, so it is reported.
     import_bases = ["", "src"]
+
+    def is_sys_path(node):
+        return isinstance(node, ast.Attribute) and node.attr == "path" and getattr(node.value, "id", None) == "sys"
+
+    direct = {
+        id(n.func.value)
+        for n in ast.walk(module)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("insert", "append")
+        and is_sys_path(n.func.value)
+    }
+    for node in ast.walk(module):
+        if is_sys_path(node) and id(node) not in direct:
+            unresolved(node, "uses sys.path in a way", "effect on imports")
+        elif isinstance(node, ast.ImportFrom) and node.module == "sys" and any(a.name == "path" for a in node.names):
+            unresolved(node, "imports sys.path", "effect on imports")
     for node in ast.walk(module):
         if not (isinstance(node, ast.Call) and call_name(node) in SYS_PATH_CALLS and isinstance(node.func, ast.Attribute)):
             continue
         receiver = node.func.value
-        is_sys_path = isinstance(receiver, ast.Attribute) and receiver.attr == "path" and getattr(receiver.value, "id", None) == "sys"
-        if not (is_sys_path or getattr(receiver, "id", None) == "site"):
+        if not (is_sys_path(receiver) or getattr(receiver, "id", None) == "site"):
             continue
         anchored = joined(node.args[-1]) if node.args else None
         targets = anchored.candidates(here) if anchored else None
@@ -815,23 +897,34 @@ def scan_python(c, path, module=None, seen=None):
         if name in IMPORT_CALLS:
             target = argument(node, 0, ("name", "mod_name"))
             literal = target.value if isinstance(target, ast.Constant) and isinstance(target.value, str) else None
+            if literal is not None and literal.startswith("."):
+                # Relative to the `package` argument, as importlib resolves it:
+                # ".version" in package "scripts" is scripts.version, ".." goes up.
+                package = argument(node, 1, ("package",)) if name == "import_module" else None
+                package = package.value if isinstance(package, ast.Constant) and isinstance(package.value, str) else None
+                level = len(literal) - len(literal.lstrip("."))
+                parts = package.split(".") if package else []
+                if not package or level - 1 > len(parts) - 1:
+                    literal = None
+                else:
+                    stem = parts[: len(parts) - (level - 1)]
+                    literal = ".".join(stem + ([literal[level:]] if literal[level:] else []))
             if literal is None:
                 unresolved(node, "imports a module", "name")
-            elif literal.startswith("."):
-                import_module(literal.lstrip("."), [here])
             else:
                 import_module(literal, import_bases)
             continue
 
         if name == "open":
             func = node.func
-            if isinstance(func, ast.Name) or (isinstance(func, ast.Attribute) and getattr(func.value, "id", None) in OPEN_MODULES):
+            module_name = getattr(func.value, "id", None) if isinstance(func, ast.Attribute) else None
+            if isinstance(func, ast.Name) or module_name in OPEN_MODULES:
                 target = argument(node, 0, ("file", "filename", "path"))
-                mode = argument(node, 1, ("mode",))
+                mode = argument(node, 1, ("flags",) if module_name == "os" else ("mode",))
             else:
                 target = func.value if isinstance(func, ast.Attribute) else None
                 mode = argument(node, 0, ("mode",))
-            if is_write_only(mode):
+            if (is_write_only_flags(mode) if module_name == "os" else is_write_only(mode)):
                 continue
         elif name in READ_CALLS:
             spec = READ_CALLS[name]
@@ -842,8 +935,8 @@ def scan_python(c, path, module=None, seen=None):
         else:
             continue
 
-        envs = environments(node)
-        resolved = envs is not None and all(
+        envs = environments(node, target)
+        resolved = bool(envs) and all(
             (anchored := joined(target, env)) is not None and track(anchored) for env in envs
         )
         if not resolved:

@@ -48,19 +48,23 @@ class LayoutTest(unittest.TestCase):
         os.chdir(self._cwd)
         self._tmp.cleanup()
 
-    def commit(self, files, remove=()):
+    def commit(self, files, remove=(), links=None):
         for path in remove:
             git(self.repo, "rm", "-rq", path)
         for path, text in files.items():
             target = Path(self.repo, path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(textwrap.dedent(text))
+        for path, referent in (links or {}).items():
+            link = Path(self.repo, path)
+            link.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink(referent, link)
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-qm", "commit", "--allow-empty")
         return git(self.repo, "rev-parse", "HEAD").strip()
 
-    def resolve(self, files):
-        sha = self.commit({**NOISE, **files})
+    def resolve(self, files, links=None):
+        sha = self.commit({**NOISE, **files}, links=links)
         return python_packaging.package_paths(sha)
 
     def matched(self, collector):
@@ -71,8 +75,8 @@ class LayoutTest(unittest.TestCase):
         out = git(self.repo, "ls-files", "--", *collector.paths)
         return set(out.split())
 
-    def assert_matches(self, files, expected):
-        c = self.resolve(files)
+    def assert_matches(self, files, expected, links=None):
+        c = self.resolve(files, links=links)
         self.assertEqual(c.problems, [])
         self.assertEqual(self.matched(c), set(expected))
         return c
@@ -786,6 +790,140 @@ class SetuptoolsTest(LayoutTest):
         )
         self.assertTrue(any("reads a file" in p for p in c.problems))
 
+    def test_relative_import_module_uses_its_package_argument(self):
+        self.assert_matches(
+            {
+                "setup.py": "import importlib\nfrom setuptools import setup\n"
+                'v = importlib.import_module(".version", package="scripts").VERSION\n'
+                'setup(name="x", version=v, packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "scripts/__init__.py": "",
+                "scripts/version.py": "",
+                "version.py": "",
+            },
+            {"pkg/__init__.py", "scripts/__init__.py", "scripts/version.py"},
+        )
+
+    def test_relative_import_module_without_a_package_is_unresolved(self):
+        c = self.resolve(
+            {
+                "setup.py": "import importlib\nfrom setuptools import setup\n"
+                'v = importlib.import_module(".version")\nsetup(name="x", packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "version.py": "",
+            }
+        )
+        self.assertTrue(any("imports a module" in p for p in c.problems))
+
+    def test_reader_referenced_other_than_by_a_call_is_unresolved(self):
+        c = self.resolve(
+            {
+                "setup.py": """\
+                    import os
+                    from pathlib import Path
+                    from setuptools import setup
+
+                    def read(path):
+                        return Path(path).read_text()
+
+                    reader = read
+                    version = reader(os.environ["VERSION_FILE"])
+                    setup(name="x", version=version, packages=["pkg"])
+                    """,
+                "pkg/__init__.py": "",
+                "metadata/VERSION": "",
+            }
+        )
+        self.assertTrue(any("reads a file" in p for p in c.problems))
+
+    def test_reader_with_a_direct_call_and_an_alias_is_unresolved(self):
+        c = self.resolve(
+            {
+                "setup.py": """\
+                    import os
+                    from pathlib import Path
+                    from setuptools import setup
+
+                    def read(path):
+                        return Path(path).read_text()
+
+                    notes = read("NOTES")
+                    reader = read
+                    version = reader(os.environ["VERSION_FILE"])
+                    setup(name="x", version=version, packages=["pkg"])
+                    """,
+                "pkg/__init__.py": "",
+                "NOTES": "",
+            }
+        )
+        # The direct call resolves, but the alias may be called with anything.
+        self.assertTrue(any("reads a file" in p for p in c.problems))
+
+    def test_reader_called_only_from_another_file_is_unresolved(self):
+        c = self.resolve(
+            {
+                "setup.py": 'from setuptools import setup\nfrom helpers import read\n'
+                'setup(name="x", version=read("VERSION"), packages=["pkg"])\n',
+                "helpers.py": "def read(path):\n    with open(path) as f:\n        return f.read()\n",
+                "pkg/__init__.py": "",
+                "VERSION": "",
+            }
+        )
+        self.assertTrue(any("helpers.py reads a file" in p for p in c.problems))
+
+    def test_function_read_not_depending_on_parameters_is_resolved(self):
+        self.assert_matches(
+            {
+                "setup.py": "from pathlib import Path\nfrom setuptools import setup\n\n"
+                "def version(unused=None):\n    return (Path(__file__).parent / 'VERSION').read_text()\n\n"
+                'setup(name="x", version=version(), packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "VERSION": "",
+            },
+            {"pkg/__init__.py", "VERSION"},
+        )
+
+    def test_sys_path_used_other_than_by_insert_or_append_is_unresolved(self):
+        for snippet in (
+            'search = sys.path\nsearch.insert(0, "build_meta")\n',
+            'sys.path[:0] = ["build_meta"]\n',
+            'sys.path += ["build_meta"]\n',
+            'from sys import path\npath.insert(0, "build_meta")\n',
+        ):
+            with self.subTest(snippet=snippet):
+                c = self.resolve(
+                    {
+                        "setup.py": "import sys\nfrom setuptools import setup\n" + snippet
+                        + 'from version import VERSION\nsetup(name="x", version=VERSION, packages=["pkg"])\n',
+                        "pkg/__init__.py": "",
+                        "build_meta/version.py": "",
+                    }
+                )
+                self.assertTrue(any("sys.path" in p for p in c.problems), c.problems)
+
+    def test_read_through_a_symlink_tracks_its_referent(self):
+        self.assert_matches(
+            {
+                "setup.py": 'from pathlib import Path\nfrom setuptools import setup\n'
+                'setup(name="x", version=Path("VERSION").read_text(), packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+                "metadata/VERSION": "",
+            },
+            {"pkg/__init__.py", "VERSION", "metadata/VERSION"},
+            links={"VERSION": "metadata/VERSION"},
+        )
+
+    def test_os_open_with_write_only_flags_is_not_a_read(self):
+        self.assert_matches(
+            {
+                "setup.py": "import os\nfrom setuptools import setup\n"
+                'fd = os.open("generated.py", os.O_WRONLY | os.O_CREAT, 0o644)\n'
+                'setup(name="x", packages=["pkg"])\n',
+                "pkg/__init__.py": "",
+            },
+            {"pkg/__init__.py"},
+        )
+
     def test_setup_py_computed_packages_is_unresolved(self):
         c = self.resolve(
             {
@@ -798,6 +936,29 @@ class SetuptoolsTest(LayoutTest):
     def test_setup_py_kwargs_spread_is_unresolved(self):
         c = self.resolve({"setup.py": "from setuptools import setup\nsetup(**CONFIG)\n", "a/__init__.py": ""})
         self.assertTrue(c.problems)
+
+
+class SymlinkTest(LayoutTest):
+    def test_symlink_in_the_package_tracks_its_referent(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+                "pkg/__init__.py": "",
+                "shared/schema.json": "",
+            },
+            {"pkg/__init__.py", "pkg/schema.json", "shared/schema.json"},
+            links={"pkg/schema.json": "../shared/schema.json"},
+        )
+
+    def test_symlink_out_of_the_repository_is_unresolved(self):
+        c = self.resolve(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\n[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+                "pkg/__init__.py": "",
+            },
+            links={"pkg/data.json": "../../outside/data.json"},
+        )
+        self.assertTrue(any("symlink" in p for p in c.problems))
 
 
 class OtherBackendsTest(LayoutTest):

@@ -33,9 +33,9 @@ write_outputs() {
 }
 
 case "${PRESET}" in
-"" | none | python) ;;
+"" | none | python | rust) ;;
 *)
-	echo "::error::Unknown preset '${PRESET}'. Supported presets: python" >&2
+	echo "::error::Unknown preset '${PRESET}'. Supported presets: python, rust" >&2
 	exit 1
 	;;
 esac
@@ -103,59 +103,85 @@ while IFS= read -r p; do
 done < <(split_list "${INPUT_EXCLUDE_PATHS:-}")
 
 HAS_TOMLLIB=false
-# Whether a pyproject.toml/hatch.toml change outside the packaging tables may be
+# Whether a build configuration change outside its packaging tables may be
 # dropped: not when every file counts, which must hold for those files too.
 NARROW_CONFIG=false
-if [[ "${PRESET}" == "python" ]]; then
-	# Files that shape the build whatever the backend: pyproject.toml and
-	# hatch.toml (narrowed below to their packaging tables), the setuptools/hatch/pdm build scripts and
-	# manifests, and the license files backends pick up by default.
-	preset_paths=(
-		"pyproject.toml"
-		"hatch.toml"
-		"setup.py"
-		"setup.cfg"
-		"MANIFEST.in"
-		"hatch_build.py"
-		"pdm_build.py"
+
+# Whether a changed file is build configuration the preset narrows to the
+# tables that reach the built package.
+is_config_file() {
+	case "${PRESET}" in
+	python) [[ "${1}" == "pyproject.toml" || "${1}" == "hatch.toml" ]] ;;
+	rust) [[ "${1}" == "Cargo.toml" || "${1}" == */Cargo.toml || "${1}" == "Cargo.lock" ]] ;;
+	*) return 1 ;;
+	esac
+}
+
+if [[ "${PRESET}" == "python" || "${PRESET}" == "rust" ]]; then
+	license_paths=(
 		":(glob)LICEN[CS]E*"
 		":(glob)LICEN[CS]ES/**"
 		":(glob)COPYING*"
 		":(glob)NOTICE*"
 		":(glob)AUTHORS*"
 	)
+	if [[ "${PRESET}" == "python" ]]; then
+		helper="python_packaging.py"
+		# Files that shape the build whatever the backend: pyproject.toml and
+		# hatch.toml (narrowed below to their packaging tables), the
+		# setuptools/hatch/pdm build scripts and manifests, and the license
+		# files backends pick up by default.
+		preset_paths=(
+			"pyproject.toml"
+			"hatch.toml"
+			"setup.py"
+			"setup.cfg"
+			"MANIFEST.in"
+			"hatch_build.py"
+			"pdm_build.py"
+			"${license_paths[@]}"
+		)
+		# Without tomllib: the build configuration and readme, whatever changed in them.
+		fallback_paths=(":(glob)README*")
+		fallback_note="any pyproject.toml, hatch.toml or README* change"
+	else
+		helper="rust_packaging.py"
+		# The root manifest (narrowed below) and the license files cargo packages;
+		# the crates, their sources and inputs come from rust_packaging.py.
+		preset_paths=("Cargo.toml" "${license_paths[@]}")
+		fallback_paths=(":(glob)README*" ":(glob)**/Cargo.toml" "Cargo.lock")
+		fallback_note="any Cargo.toml, Cargo.lock or README* change"
+	fi
 	sources_found=false
 	if "${PYTHON}" -c 'import tomllib' >/dev/null 2>&1; then
 		HAS_TOMLLIB=true
-		# The package sources, located from the build backend's configuration,
-		# and the readme and license files pyproject.toml declares.
 		problems_file=$(mktemp)
 		rc=0
-		located=$("${PYTHON}" "${ACTION_DIR}/python_packaging.py" package-paths "${BASE_SHA}" "${HEAD_SHA}" 2>"${problems_file}") || rc=$?
+		located=$("${PYTHON}" "${ACTION_DIR}/${helper}" package-paths "${BASE_SHA}" "${HEAD_SHA}" 2>"${problems_file}") || rc=$?
 		while IFS= read -r p; do
 			[[ -n "${p}" ]] && preset_paths+=("${p}")
 		done <<<"${located}"
 		while IFS= read -r problem; do
-			[[ -n "${problem}" ]] && echo "::warning::python preset: ${problem}"
+			[[ -n "${problem}" ]] && echo "::warning::${PRESET} preset: ${problem}"
 		done <"${problems_file}"
 		rm -f "${problems_file}"
 		[[ ${rc} -eq 0 ]] && sources_found=true
 	else
-		echo "::warning::Python 3.11+ (tomllib) not found; the python preset cannot read the build configuration, so every changed file counts, or, with 'paths' set, 'paths' plus any pyproject.toml, hatch.toml or README* change"
-		preset_paths+=(":(glob)README*")
+		echo "::warning::Python 3.11+ (tomllib) not found; the ${PRESET} preset cannot read the build configuration, so every changed file counts, or, with 'paths' set, 'paths' plus ${fallback_note}"
+		preset_paths+=("${fallback_paths[@]}")
 	fi
 
 	if [[ "${sources_found}" == "true" ]]; then
 		includes+=("${preset_paths[@]}")
 		NARROW_CONFIG=${HAS_TOMLLIB}
 	elif [[ ${#includes[@]} -gt 0 ]]; then
-		echo "::warning::python preset: package sources not fully located; relying on 'paths' for them"
+		echo "::warning::${PRESET} preset: package sources not fully located; relying on 'paths' for them"
 		includes+=("${preset_paths[@]}")
 		NARROW_CONFIG=${HAS_TOMLLIB}
 	else
 		# Missing a release is worse than an extra one, so with nothing to go
 		# on every file counts. Setting 'paths' to the package sources fixes it.
-		echo "::warning::python preset: package sources not located and 'paths' is empty; every changed file counts. Set 'paths' to the package's source directories."
+		echo "::warning::${PRESET} preset: package sources not located and 'paths' is empty; every changed file counts. Set 'paths' to the package's source directories."
 		includes=()
 	fi
 fi
@@ -176,9 +202,9 @@ fi
 
 changed=()
 while IFS= read -r f; do
-	if [[ "${NARROW_CONFIG}" == "true" && ("${f}" == "pyproject.toml" || "${f}" == "hatch.toml") ]]; then
+	if [[ "${NARROW_CONFIG}" == "true" ]] && is_config_file "${f}"; then
 		rc=0
-		"${PYTHON}" "${ACTION_DIR}/python_packaging.py" material "${BASE_SHA}" "${HEAD_SHA}" "${f}" </dev/null || rc=$?
+		"${PYTHON}" "${ACTION_DIR}/${helper}" material "${BASE_SHA}" "${HEAD_SHA}" "${f}" </dev/null || rc=$?
 		if [[ ${rc} -eq 1 ]]; then
 			echo "${f} changed outside its packaging tables → not material"
 			continue

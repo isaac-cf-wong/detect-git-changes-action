@@ -201,6 +201,63 @@ located, as above: every changed file counts, or, with `paths` set, `paths` and
 any change to `pyproject.toml`, `hatch.toml` or `README*`. A `pyproject.toml`
 that cannot be parsed is treated as material.
 
+#### `rust`
+
+The preset reads `Cargo.toml` to find the crates that are released and what they
+are built from. Each published crate counts: the root package, and every
+workspace member that does not set `publish = false`. A member with
+`publish = false` (an `xtask`, a fuzzing or benchmark crate) counts only when a
+published crate builds against it.
+
+| Tracked                                                       | Why                                    |
+| ------------------------------------------------------------- | -------------------------------------- |
+| Each crate's `src/`, and `lib`/`bin` targets placed elsewhere | The crate itself.                      |
+| The root's and each tracked crate's `Cargo.toml` (narrowed)   | Dependencies, features, metadata.      |
+| Files the code pulls in (see below)                           | Compiled into the crate.               |
+| The build script and the inputs it declares                   | Its output is compiled into the crate. |
+| Local crates reached through `path` dependencies              | Built into the crate.                  |
+| The `readme`, `license-file` and default license files        | Shipped with the crate.                |
+| `Cargo.lock`, `.cargo/config.toml`: binaries only (narrowed)  | Fix what a binary is built with.       |
+
+Tests, benches and examples, `[dev-dependencies]`, docs, CI workflows and
+`rust-toolchain.toml` do not count.
+
+Files the code pulls in are found by reading the sources, never by building:
+
+- `include_str!`, `include_bytes!` and `include!` with a string literal,
+  resolved relative to the file that uses it; a `concat!` of literals and macro
+  variables, as in `include_str!(concat!("../lang/", $lang, ".txt"))`, counts
+  every file it can name; `env!("OUT_DIR")` paths are the build script's output,
+  covered by its inputs.
+- `#[path = "..."]` modules, and the modules of a target outside `src/`.
+- Any path-like string, or one passed to a macro or attribute, that names a
+  tracked file or directory, relative to the file, the crate or its `src/`: this
+  covers proc macros that read files, such as `include_dir!`, rust-embed's
+  `#[folder]`, `sqlx::migrate!` and pest's `#[grammar]`. `$CARGO_MANIFEST_DIR`
+  and `env!("CARGO_MANIFEST_DIR")` stand for the crate's directory.
+- A file inside a git submodule counts through the submodule's commit.
+
+A build script's inputs are those it declares with `cargo:rerun-if-changed`.
+When it declares no `rerun-if-changed` or `rerun-if-env-changed` at all, cargo
+treats every file in the crate as its input, and so does the preset: the sources
+count as not located. The same holds for an include whose path is not a string
+literal, a `rerun-if-changed` path formatted at build time, a path dependency
+outside the repository, and a manifest that does not parse.
+
+A change to a `Cargo.toml` counts only outside `[dev-dependencies]` (including
+target-specific ones), `[lints]`, `[badges]`, `[package.metadata]`,
+`[workspace.metadata]`, `[workspace.lints]` and the `[[bench]]`, `[[test]]` and
+`[[example]]` targets. A change to `Cargo.lock` counts only when it changes a
+locked package that a published crate builds with: one reachable from its normal
+and build dependencies. Cargo.lock does not record which features are enabled,
+so a package switched on only by a dev-dependency's feature can still count. A
+project that does not want lock-file updates to trigger a release can drop them
+with `exclude-paths: Cargo.lock`.
+
+The preset needs Python 3.11 or later on the runner, as the `python` preset
+does; without it, every changed file counts, or, with `paths` set, `paths` and
+any change to a `Cargo.toml`, `Cargo.lock` or `README*`.
+
 ## Inputs
 
 | Input            | Description                                                            | Required | Default |
@@ -210,7 +267,7 @@ that cannot be parsed is treated as material.
 | `head-ref`       | Head ref to compare to.                                                | No       | `HEAD`  |
 | `paths`          | Pathspecs to limit the comparison to, comma- or newline-separated.     | No       | -       |
 | `exclude-paths`  | Pathspecs to leave out of the comparison, comma- or newline-separated. | No       | -       |
-| `preset`         | Track the files that materially affect a package. Supported: `python`. | No       | -       |
+| `preset`         | Track the files that materially affect a package: `python` or `rust`.  | No       | -       |
 
 ## Outputs
 

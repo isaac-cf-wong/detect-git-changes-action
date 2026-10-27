@@ -480,3 +480,35 @@ teardown() {
 	[ "$status" -eq 0 ]
 	[ "$(output_value has_changes)" = "false" ]
 }
+
+@test "python preset: a requirements file feeding dynamic dependencies counts" {
+	cat >pyproject.toml <<'TOML'
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "demo"
+version = "0.1.0"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["demo"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+TOML
+	echo "typer>=0.26" >requirements.txt
+	commit_all "dynamic deps"
+	git tag v0.2.0
+	echo "typer>=0.27" >requirements.txt
+	commit_all "bump runtime dependency"
+
+	export INPUT_PRESET="python"
+	run bash "$SCRIPT_PATH"
+
+	[ "$status" -eq 0 ]
+	[ "$(output_value has_changes)" = "true" ]
+	[ "$(changed_files)" = "requirements.txt" ]
+}

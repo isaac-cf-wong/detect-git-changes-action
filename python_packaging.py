@@ -145,6 +145,18 @@ def str_list(value):
     return []
 
 
+def strings(value):
+    """Every string inside a TOML value, depth first."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, list):
+        for item in value:
+            yield from strings(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from strings(item)
+
+
 def clean(path):
     """A repository-relative path, or None for one that leaves the repository."""
     if not isinstance(path, str) or not path or path.startswith("/"):
@@ -292,6 +304,25 @@ def hatch(c, data, sha):
         custom = hooks.get("custom")
         if isinstance(custom, dict):
             c.build_hook(custom.get("path", "hatch_build.py"), "hatchling")
+
+    # Metadata read from files: the version source, and metadata hooks that
+    # fill dynamic fields from files (hatch-requirements-txt,
+    # hatch-fancy-pypi-readme). A hook that runs code, or one not known
+    # here, may read files no configuration names.
+    c.add(table(data, "tool", "hatch", "version").get("path"))
+    for name, hook in table(data, "tool", "hatch", "metadata", "hooks").items():
+        if name == "custom":
+            path = hook.get("path", "hatch_build.py") if isinstance(hook, dict) else "hatch_build.py"
+            c.add(path)
+            c.unresolved(f"hatchling: custom metadata hook {path} runs code that may read files the preset cannot see")
+            continue
+        if name not in KNOWN_HATCH_METADATA_HOOKS:
+            c.unresolved(f"hatchling: metadata hook {name!r} is not one the python preset knows, and may read files")
+        for value in strings(hook):
+            if is_pattern(value):
+                c.add_glob(value)
+            elif c.tree.is_file(clean(value) or ""):
+                c.add(value)
     if include or packages or only_include:
         return
 
@@ -307,6 +338,10 @@ def hatch(c, data, sha):
             return
     if not force_include:
         c.unresolved("hatchling: no packages, include or only-include configured, and no package named after the project")
+
+
+# Metadata hooks whose file inputs all appear as strings in their table.
+KNOWN_HATCH_METADATA_HOOKS = ("requirements_txt", "fancy-pypi-readme")
 
 
 class Find:
@@ -347,6 +382,8 @@ class SetuptoolsConfig:
         self.py_modules = None
         self.sources = []
         self.data_files = []  # sources installed through data-files, globs allowed
+        self.metadata_files = []  # files dynamic metadata is read from
+        self.attr_modules = []  # modules `attr:` directives import a value from
 
     def package_path(self, name):
         parts = name.split(".")
@@ -377,6 +414,20 @@ def read_setuptools_pyproject(cfg, data):
     for patterns in table(st, "data-files").values():
         cfg.data_files += str_list(patterns)
 
+    # [tool.setuptools.dynamic]: {file = ...} and {attr = ...} at any depth
+    # (optional-dependencies nests one table per extra).
+    def directives(value):
+        if isinstance(value, dict):
+            if "file" in value:
+                cfg.metadata_files += str_list(value["file"])
+            if isinstance(value.get("attr"), str):
+                cfg.attr_modules.append(value["attr"].rsplit(".", 1)[0])
+            for item in value.values():
+                if isinstance(item, dict):
+                    directives(item)
+
+    directives(table(st, "dynamic"))
+
 
 def cfg_list(value):
     return [v.strip() for v in re.split(r"[,\n]", value) if v.strip()]
@@ -389,6 +440,15 @@ def read_setup_cfg(cfg, text, c):
     except configparser.Error as exc:
         c.unresolved(f"setup.cfg does not parse: {exc}")
         return
+    # `file:` and `attr:` directives, in [metadata], [options] and the
+    # [options.*] sections such as extras_require.
+    for section in parser.sections():
+        for value in parser[section].values():
+            value = value.strip()
+            if value.startswith("file:"):
+                cfg.metadata_files += cfg_list(value[len("file:") :])
+            elif value.startswith("attr:"):
+                cfg.attr_modules.append(value[len("attr:") :].strip().rsplit(".", 1)[0])
     if not parser.has_section("options"):
         return
     options = parser["options"]
@@ -429,6 +489,12 @@ def read_setup_py(cfg, text, c):
     except SyntaxError as exc:
         c.unresolved(f"setup.py does not parse: {exc}")
         return
+    # Any tracked file setup.py names, e.g. a README or VERSION it reads.
+    for node in ast.walk(module):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            path = clean(node.value)
+            if path and c.tree.is_file(path):
+                c.add(path)
     calls = [n for n in ast.walk(module) if isinstance(n, ast.Call) and call_name(n) == "setup"]
     if not calls:
         return
@@ -526,8 +592,12 @@ def setuptools(c, data, sha):
         if text is not None:
             reader(cfg, text, c)
 
-    for source in cfg.sources + cfg.data_files:
+    for source in cfg.sources + cfg.data_files + cfg.metadata_files:
         c.add_path_or_glob(source)
+    for module_name in cfg.attr_modules:
+        path = cfg.package_path(module_name)
+        c.add(path)
+        c.add(f"{path}.py")
 
     if cfg.packages is None and cfg.py_modules is None:
         # setuptools auto-discovery: src-layout when the package root exists,
@@ -580,6 +650,8 @@ def poetry(c, data, sha):
         path = entry if isinstance(entry, str) else entry.get("path") if isinstance(entry, dict) else None
         if path and for_wheel(entry):
             c.add_path_or_glob(path)
+    for readme in str_list(tool.get("readme")):
+        c.add(readme)
     build = tool.get("build")
     script = build if isinstance(build, str) else build.get("script") if isinstance(build, dict) else None
     if script:
@@ -601,6 +673,9 @@ def flit(c, data, sha):
 
 def pdm(c, data, sha):
     build = table(data, "tool", "pdm", "build")
+    version = table(data, "tool", "pdm", "version")
+    if version.get("source") == "file":
+        c.add(version.get("path"))
     hook = build.get("custom-hook", "pdm_build.py")
     if c.tree.is_file(clean(hook) or ""):
         c.build_hook(hook, "pdm-backend")

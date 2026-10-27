@@ -94,7 +94,18 @@ them should trigger a release.
 | `pyproject.toml` (packaging tables only, see below)                      | Metadata, dependencies, build.   |
 | `setup.py`, `setup.cfg`, `MANIFEST.in`, `hatch_build.py`, `pdm_build.py` | Build scripts and manifests.     |
 | `readme`, `license` and `license-files` in pyproject.toml                | Shipped in the package metadata. |
+| Files dynamic metadata is read from (see below)                          | Version, dependencies, readme.   |
 | `LICEN[CS]E*`, `LICEN[CS]ES/**`, `COPYING*`, `NOTICE*`, `AUTHORS*`       | Default license files.           |
+
+Files that fill in metadata are tracked too, since changing one changes the
+wheel's `METADATA`: setuptools `[tool.setuptools.dynamic]` `file` and `attr`
+directives and `setup.cfg` `file:` / `attr:` directives (e.g. a
+`requirements.txt` feeding `dependencies`), any tracked file a `setup.py` names
+(e.g. a README or `VERSION` it reads), hatchling's `[tool.hatch.version]` `path`
+and the files given to the `requirements_txt` and `fancy-pypi-readme` metadata
+hooks, pdm's `[tool.pdm.version]` file, and poetry's `[tool.poetry]` `readme`. A
+hatch custom metadata hook, or one the preset does not know, counts as not
+located (see below).
 
 Package sources are located per build backend:
 

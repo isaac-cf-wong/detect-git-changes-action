@@ -183,6 +183,46 @@ class HatchTest(LayoutTest):
             {"lib/pkg/__init__.py", "lib/pkg/sub/mod.py", "other/py.typed"},
         )
 
+    def test_version_path_outside_package(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\ndynamic = ["version"]\n'
+                '[tool.hatch.version]\npath = "VERSION.py"\n'
+                '[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+                "pkg/__init__.py": "",
+                "VERSION.py": "",
+            },
+            {"pkg/__init__.py", "VERSION.py"},
+        )
+
+    def test_requirements_txt_metadata_hook(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": HATCH + '[project]\nname = "x"\ndynamic = ["dependencies"]\n'
+                '[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n'
+                '[tool.hatch.metadata.hooks.requirements_txt]\nfiles = ["requirements.txt"]\n'
+                '[tool.hatch.metadata.hooks.requirements_txt.optional-dependencies]\ncli = ["requirements-cli.txt"]\n',
+                "pkg/__init__.py": "",
+                "requirements.txt": "",
+                "requirements-cli.txt": "",
+                "requirements-dev.txt": "",
+            },
+            {"pkg/__init__.py", "requirements.txt", "requirements-cli.txt"},
+        )
+
+    def test_custom_or_unknown_metadata_hook_is_unresolved(self):
+        for hook in ("custom", "something-new"):
+            with self.subTest(hook=hook):
+                c = self.resolve(
+                    {
+                        "pyproject.toml": HATCH + '[project]\nname = "x"\n'
+                        '[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n'
+                        f'[tool.hatch.metadata.hooks.{hook}]\n',
+                        "pkg/__init__.py": "",
+                    }
+                )
+                self.assertTrue(any("metadata hook" in p for p in c.problems))
+
     def test_nothing_found_is_unresolved(self):
         c = self.resolve({"pyproject.toml": HATCH + '[project]\nname = "absent"\n', "lib/pkg/__init__.py": ""})
         self.assertTrue(c.problems)
@@ -373,6 +413,91 @@ class SetuptoolsTest(LayoutTest):
         )
         self.assertTrue(any("data_files" in p for p in c.problems))
 
+    def test_pyproject_dynamic_file_and_attr(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": SETUPTOOLS + '[project]\nname = "x"\n'
+                'dynamic = ["version", "dependencies", "optional-dependencies", "readme"]\n'
+                '[tool.setuptools]\npackages = ["pkg"]\n'
+                '[tool.setuptools.dynamic]\nversion = { attr = "_meta.__version__" }\n'
+                'dependencies = { file = ["requirements.txt"] }\n'
+                'readme = { file = ["README.rst", "CHANGES.rst"], content-type = "text/x-rst" }\n'
+                '[tool.setuptools.dynamic.optional-dependencies]\ncli = { file = "requirements-cli.txt" }\n',
+                "pkg/__init__.py": "",
+                "_meta.py": "",
+                "requirements.txt": "",
+                "requirements-cli.txt": "",
+                "README.rst": "",
+                "CHANGES.rst": "",
+                "requirements-dev.txt": "",
+            },
+            {
+                "pkg/__init__.py",
+                "_meta.py",
+                "requirements.txt",
+                "requirements-cli.txt",
+                "README.rst",
+                "CHANGES.rst",
+            },
+        )
+
+    def test_setup_cfg_file_and_attr_directives(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": SETUPTOOLS,
+                "setup.cfg": """\
+                    [metadata]
+                    name = x
+                    version = attr: _meta.VERSION
+                    long_description = file: README.rst, CHANGES.rst
+
+                    [options]
+                    packages = pkg
+                    install_requires = file: requirements.txt
+
+                    [options.extras_require]
+                    cli = file: requirements-cli.txt
+                    """,
+                "pkg/__init__.py": "",
+                "_meta.py": "",
+                "README.rst": "",
+                "CHANGES.rst": "",
+                "requirements.txt": "",
+                "requirements-cli.txt": "",
+                "requirements-dev.txt": "",
+            },
+            {
+                "pkg/__init__.py",
+                "_meta.py",
+                "README.rst",
+                "CHANGES.rst",
+                "requirements.txt",
+                "requirements-cli.txt",
+            },
+        )
+
+    def test_setup_py_files_it_names(self):
+        self.assert_matches(
+            {
+                "setup.py": """\
+                    import os
+                    from pathlib import Path
+                    from setuptools import setup
+
+                    here = os.path.dirname(__file__)
+                    with open(os.path.join(here, "README.md"), encoding="utf-8") as f:
+                        long_description = f.read()
+                    version = (Path(__file__).parent / "VERSION").read_text().strip()
+                    setup(name="x", packages=["pkg"])
+                    """,
+                "pkg/__init__.py": "",
+                "README.md": "",
+                "VERSION": "",
+                "NOTES.md": "",
+            },
+            {"pkg/__init__.py", "README.md", "VERSION"},
+        )
+
     def test_setup_py_computed_packages_is_unresolved(self):
         c = self.resolve(
             {
@@ -421,6 +546,29 @@ class OtherBackendsTest(LayoutTest):
             }
         )
         self.assertTrue(any("pdm_build.py" in p for p in c.problems))
+
+    def test_poetry_readme(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": '[build-system]\nbuild-backend = "poetry.core.masonry.api"\n'
+                '[tool.poetry]\nname = "x"\nreadme = ["README.md", "docs/USAGE.md"]\n',
+                "x/__init__.py": "",
+                "README.md": "",
+                "docs/USAGE.md": "",
+            },
+            {"x/__init__.py", "README.md", "docs/USAGE.md"},
+        )
+
+    def test_pdm_version_file(self):
+        self.assert_matches(
+            {
+                "pyproject.toml": '[build-system]\nbuild-backend = "pdm.backend"\n[project]\nname = "x"\n'
+                '[tool.pdm.version]\nsource = "file"\npath = "meta/version.py"\n',
+                "src/x/__init__.py": "",
+                "meta/version.py": "",
+            },
+            {"src/x/__init__.py", "meta/version.py"},
+        )
 
     def test_poetry_default(self):
         self.assert_matches(
